@@ -9,3 +9,6 @@ apps/desktop/src-tauri/target
 # 本地环境
 .env
 .env.local
+# 本地依赖产物（librime 源码/预编译包、临时构建）
+.deps/
+apps/desktop/src-tauri/gen/

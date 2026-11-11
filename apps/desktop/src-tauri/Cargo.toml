@@ -15,6 +15,8 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_yaml = "0.9"
+qieyun-kit = { path = "../../../crates/qieyun-kit" }
 
 # 独立的 Cargo workspace：避免被仓库根目录的 workspace 意外吸纳/误构建。
 # 前端构建（pnpm build）不依赖本目录；cargo 构建由 lead 在根 workspace 统一处理。

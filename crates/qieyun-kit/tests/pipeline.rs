@@ -36,7 +36,7 @@ patch:
 fn full_config_lifecycle() {
     let root = tmp_workdir("lifecycle");
     let rime_dir = root.join("Rime");
-    let store = rime_dir.join(".qieyun-studio/snapshots");
+    let store = rime_dir.join(".qieyun/snapshots");
     fs::create_dir_all(&rime_dir).unwrap();
 
     let target = rime_dir.join("squirrel.custom.yaml");
@@ -108,7 +108,7 @@ fn full_config_lifecycle() {
     assert_eq!(win.args, vec!["/deploy"]);
 
     // 7) 状态文件可持久化并读回
-    let state_path = rime_dir.join(".qieyun-studio/state.json");
+    let state_path = rime_dir.join(".qieyun/state.json");
     state.save(&state_path).unwrap();
     let loaded = State::load(&state_path).unwrap();
     assert_eq!(loaded.owned_keys(file), state.owned_keys(file));

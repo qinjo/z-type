@@ -9,16 +9,22 @@
 //!
 //! 对应文档：`docs/architecture.md` §4/§5，决策记录见 `docs/adr/`。
 
+pub mod env;
 pub mod fuzzy;
 pub mod manifest;
 pub mod patch;
 pub mod platform;
+pub mod profile;
 pub mod reload;
 pub mod snapshot;
 pub mod theme;
 pub mod time;
+pub mod workspace;
 
+pub use env::{probe, EnvInfo, InstallationMeta};
 pub use manifest::{Drift, State};
 pub use patch::{apply_edits, CreatePolicy, Edit, PatchError};
 pub use platform::Platform;
+pub use profile::{Profile, SchemaEntry};
 pub use theme::{Colors, Font, Layout, Orientation, Rgba, Theme};
+pub use workspace::{Workspace, WriteError, WriteOutcome};

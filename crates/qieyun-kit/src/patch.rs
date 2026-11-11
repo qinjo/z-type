@@ -111,8 +111,10 @@ pub fn apply_edits(text: &str, edits: &[Edit], policy: CreatePolicy) -> Result<S
         match policy {
             CreatePolicy::Create => {
                 lines = vec![
-                    "# Managed by 切韵. Keys tracked in .qieyun-studio/state.json may be rewritten;".to_string(),
-                    "# everything else in this file is yours and is preserved verbatim.".to_string(),
+                    "# Managed by 切韵. Keys tracked in .qieyun/state.json may be rewritten;"
+                        .to_string(),
+                    "# everything else in this file is yours and is preserved verbatim."
+                        .to_string(),
                     "patch:".to_string(),
                 ];
             }

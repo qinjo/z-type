@@ -51,6 +51,20 @@ export interface WriteResult {
   written_files: string[];
 }
 
+/**
+ * `write_gui_config` 的载荷：文件名 → 该文件的编辑序列。
+ * 对应 Rust 侧 `commands::GuiPatch`（`op` 用 tag 区分，serde 反序列化）。
+ */
+export type GuiEdit =
+  | { op: "set"; key: string; value: unknown }
+  | { op: "setraw"; key: string; raw: string }
+  | { op: "remove"; key: string };
+
+export interface GuiPatch {
+  files: Record<string, GuiEdit[]>;
+  note?: string;
+}
+
 /** 命令名 -> { 参数, 返回值 } 的静态映射，供实现方与调用方共同引用。 */
 export interface IpcContract {
   get_env_info: { args: undefined; result: EnvInfo };
@@ -59,7 +73,7 @@ export interface IpcContract {
   create_snapshot: { args: { note: string }; result: { id: string } };
   deploy: { args: undefined; result: DeployResult };
   read_file: { args: { path: string }; result: FileContent };
-  write_gui_config: { args: { patch: unknown }; result: WriteResult };
+  write_gui_config: { args: { patch: GuiPatch }; result: WriteResult };
 }
 
 export type IpcCommand = keyof IpcContract;
@@ -204,7 +218,7 @@ export const ipc = {
     return call("read_file", { path }, () => MOCK_FILE_CONTENT);
   },
 
-  writeGuiConfig(patch: unknown): Promise<WriteResult> {
+  writeGuiConfig(patch: GuiPatch): Promise<WriteResult> {
     return call("write_gui_config", { patch }, () => MOCK_WRITE_RESULT);
   },
 };

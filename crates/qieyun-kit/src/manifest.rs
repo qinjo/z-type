@@ -1,4 +1,4 @@
-//! `.qieyun-studio/state.json`：GUI 的托管键清单。
+//! `.qieyun/state.json`：GUI 的托管键清单。
 //!
 //! 这是"哪些键归 GUI 所有"的唯一真相来源。不在清单里的键，无论文件里写了什么，
 //! 都视为用户的，GUI 只读不改。

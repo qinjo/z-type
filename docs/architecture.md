@@ -93,7 +93,7 @@ z-type/
 
 ### 4.3 托管键（managed keys）
 
-GUI 在用户目录下维护 `.qieyun-studio/state.json`：
+GUI 在用户目录下维护 `.qieyun/state.json`：
 
 ```json
 {
@@ -154,7 +154,7 @@ apply_edits(text, edits) -> new_text
 ### 4.6 原子写与快照
 
 - 写入：写临时文件 → fsync → `rename` 覆盖（同目录，保证原子）；失败回滚。
-- 写前快照：`.qieyun-studio/snapshots/<ISO8601>/`，只复制配置类文件（`*.yaml`、`*.txt`、`installation.yaml`），排除 `build/`、`*.userdb/`、`plum/`。
+- 写前快照：`.qieyun/snapshots/<ISO8601>/`，只复制配置类文件（`*.yaml`、`*.txt`、`installation.yaml`），排除 `build/`、`*.userdb/`、`plum/`。
 - 快照保留最近 N 份（默认 20）+ 每次"批量修改"另存一份；支持从快照一键恢复（恢复前再存一份当前状态）。
 
 ## 5. 主题模型与双端编译
@@ -240,7 +240,7 @@ patch:
 
 ### 6.3 并发与锁
 
-- GUI 侧对"部署"动作加进程内互斥 + 用户目录下 `.qieyun-studio/deploy.lock`（PID + 时间戳，超时 120s 视为陈旧锁）。
+- GUI 侧对"部署"动作加进程内互斥 + 用户目录下 `.qieyun/deploy.lock`（PID + 时间戳，超时 120s 视为陈旧锁）。
 - 部署期间输入法仍在接受输入（同一用户），librime 允许读 build 产物时被替换；Windows 走 WeaselDeployer 时由其维护维护模式，风险最低。
 - 部署失败时**不回滚已写入的 YAML**（用户可能只想改文件），但 UI 明确提示"文件已改、部署失败"，并提供"回滚到上一快照"按钮。
 
