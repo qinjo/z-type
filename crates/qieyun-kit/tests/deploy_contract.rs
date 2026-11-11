@@ -175,3 +175,82 @@ fn deployer_rejects_broken_patch_and_we_can_report_it() {
 fn exists(p: impl AsRef<Path>) -> bool {
     p.as_ref().exists()
 }
+
+/// 证明"启用/停用方案"真的会被 librime 采用：schema_list 里有的方案才会被编译。
+#[test]
+fn schema_list_controls_what_gets_compiled() {
+    let Some(deployer) = deployer() else {
+        eprintln!("跳过：未设置 QIEYUN_RIME_DEPLOYER");
+        return;
+    };
+    use qieyun_kit::input::{AsciiToggleKey, InputSettings, PageKeys};
+
+    let root = tmpdir("schema-list");
+    let user = root.join("user");
+    std::fs::create_dir_all(&user).unwrap();
+    std::fs::write(
+        user.join("default.yaml"),
+        "schema_list:\n  - schema: qieyun_a\n",
+    )
+    .unwrap();
+
+    for (id, name) in [("qieyun_a", "方案A"), ("qieyun_b", "方案B")] {
+        std::fs::write(
+            user.join(format!("{id}.schema.yaml")),
+            format!(
+                "---\nschema:\n  schema_id: {id}\n  name: {name}\n  version: \"1\"\nspeller:\n  alphabet: abcdefghijklmnopqrstuvwxyz\n  delimiter: \" '\"\ntranslator:\n  dictionary: {id}\nmenu:\n  page_size: 5\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            user.join(format!("{id}.dict.yaml")),
+            format!("---\nname: {id}\nversion: \"1\"\nsort: by_weight\n...\n\na\t啊\n"),
+        )
+        .unwrap();
+    }
+
+    // 只启用 A
+    let settings = InputSettings {
+        schema_list: vec!["qieyun_a".into()],
+        page_size: 8,
+        page_keys: PageKeys::CommaPeriod,
+        toggle_ascii: AsciiToggleKey::ControlShiftSpace,
+    };
+    let existing = serde_yaml::Value::Null;
+    let text = apply_edits("", &settings.edits(&existing), CreatePolicy::Create).unwrap();
+    std::fs::write(user.join("default.custom.yaml"), &text).unwrap();
+
+    let output = run_deployer(&deployer, &user);
+    assert!(
+        output.status.success(),
+        "部署失败：{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(user.join("build/qieyun_a.schema.yaml").is_file());
+    assert!(
+        !user.join("build/qieyun_b.schema.yaml").is_file(),
+        "未启用的方案不应被编译"
+    );
+
+    // 再把 B 也启用 → 之后两者都应被编译。
+    // 注意：librime 用「秒级 mtime」判断配置是否变化，同一秒内的第二次部署会被跳过，
+    // 所以这里必须跨过一秒边界（产品侧由 deploy 命令做对齐，见 commands::deploy）。
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let settings = InputSettings {
+        schema_list: vec!["qieyun_a".into(), "qieyun_b".into()],
+        ..settings
+    };
+    let current = std::fs::read_to_string(user.join("default.custom.yaml")).unwrap();
+    let parsed: serde_yaml::Value = serde_yaml::from_str(&current).unwrap();
+    let text = apply_edits(&current, &settings.edits(&parsed), CreatePolicy::Reject).unwrap();
+    std::fs::write(user.join("default.custom.yaml"), text).unwrap();
+
+    let output = run_deployer(&deployer, &user);
+    assert!(output.status.success());
+    assert!(
+        user.join("build/qieyun_b.schema.yaml").is_file(),
+        "启用后方案 B 应被编译"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}

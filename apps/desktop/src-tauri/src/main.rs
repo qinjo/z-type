@@ -24,6 +24,8 @@ fn main() {
             commands::list_theme_presets,
             commands::apply_theme,
             commands::apply_and_deploy,
+            commands::get_input_settings,
+            commands::apply_input_settings,
         ])
         .run(tauri::generate_context!())
         .expect("切韵启动失败");

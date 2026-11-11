@@ -67,3 +67,17 @@ cargo 侧建议：`CARGO_NET_RETRY=10 CARGO_HTTP_TIMEOUT=180 CARGO_HTTP_MULTIPLE
 - GUI 验证：进程与窗口存在（CGWindowList 报告 1180×781 位于 250,118），但本机
   屏幕捕获权限拿不到窗口像素（`screencapture -l` 报 could not create image from window），
   界面观感需人工确认。
+
+## M3：方案/按键与部署的秒级陷阱
+
+- `default.custom.yaml` 的 `schema_list` 决定**哪些方案会被编译**：契约测试
+  `schema_list_controls_what_gets_compiled` 用两个最小方案验证了"未启用 → 不生成
+  `build/<id>.schema.yaml`，启用后生成"。
+- `key_binder/bindings` 是用户常自己写的地方。GUI 只按 `accept` 键接管自己那批
+  （comma/period/bracketleft/bracketright/Page_Up/Page_Down/Control+Shift+space/Shift_L），
+  其余行（emoji、简繁等）原样保留。
+- 简繁开关在不同方案里叫法不同（本机 `transcription`，rime-ice 用别的名字），
+  所以 v1 不做"简繁热键"，等到能按方案读取 `switches` 再做。
+- **秒级 mtime 陷阱**：librime 的 `WorkspaceUpdate` 用秒级时间戳判断配置是否变化，
+  同一秒内连续部署会被判定为无变化而跳过。产品侧在 `deploy()` 里做秒边界对齐
+  （`.qieyun/last_deploy`），测试侧显式跨秒。

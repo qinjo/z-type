@@ -51,6 +51,24 @@ export interface WriteResult {
   written_files: string[];
 }
 
+/** 翻页键风格（Rust `PageKeys`，snake_case 序列化）。 */
+export type PageKeys = "comma_period" | "bracket" | "page_up_down" | "off";
+
+/** 中英切换热键（Rust `AsciiToggleKey`，snake_case 序列化）。 */
+export type AsciiToggleKey = "control_shift_space" | "shift_left" | "off";
+
+/**
+ * `default.custom.yaml` 里 GUI 托管的输入设置。
+ * `schema_list` 的顺序即生效顺序，第一个是默认方案。
+ */
+export interface InputSettings {
+  schema_list: string[];
+  /** 候选数量，3–10。 */
+  page_size: number;
+  page_keys: PageKeys;
+  toggle_ascii: AsciiToggleKey;
+}
+
 /** 首启接管计划：接管只备份 + 登记托管键，不做任何配置写入。 */
 export interface TakeoverPlan {
   taken_over: boolean;
@@ -138,6 +156,8 @@ export interface IpcContract {
   accept_takeover: { args: undefined; result: TakeoverResult };
   list_theme_presets: { args: undefined; result: ThemePreset[] };
   apply_theme: { args: { theme: ThemePreset }; result: WriteResult };
+  get_input_settings: { args: undefined; result: InputSettings };
+  apply_input_settings: { args: { settings: InputSettings }; result: WriteResult };
   apply_and_deploy: { args: undefined; result: DeployResult };
 }
 
@@ -212,6 +232,21 @@ const MOCK_DEPLOY_RESULT: DeployResult = {
 const MOCK_WRITE_RESULT: WriteResult = {
   written_files: ["~/Library/Rime/default.custom.yaml", "~/Library/Rime/squirrel.custom.yaml"],
 };
+
+/** mock 的输入设置：与 `MOCK_PROFILE` 里默认启用的三个方案保持一致。 */
+const MOCK_INPUT_SETTINGS: InputSettings = {
+  schema_list: ["rime_ice", "double_pinyin_flypy", "luna_pinyin"],
+  page_size: 7,
+  page_keys: "comma_period",
+  toggle_ascii: "control_shift_space",
+};
+
+/** mock 模式下模拟真实写回：保存后 `get_input_settings` / `scan_profile` 都能读到新值。 */
+let mockInputSettings: InputSettings = cloneInputSettings(MOCK_INPUT_SETTINGS);
+
+function cloneInputSettings(settings: InputSettings): InputSettings {
+  return { ...settings, schema_list: [...settings.schema_list] };
+}
 
 /** 主题写回只会落在当前平台的样式文件上。 */
 const MOCK_THEME_WRITE_RESULT: WriteResult = {
@@ -353,7 +388,19 @@ export const ipc = {
   },
 
   scanProfile(): Promise<Profile> {
-    return call("scan_profile", undefined, () => MOCK_PROFILE);
+    return call("scan_profile", undefined, () => {
+      // mock 下让 enabled / default_schema 跟随最近的 apply_input_settings，
+      // 这样「保存后重新扫描」在浏览器里也能看到状态变化。
+      const enabled = new Set(mockInputSettings.schema_list);
+      return {
+        ...MOCK_PROFILE,
+        schemas: MOCK_PROFILE.schemas.map((schema) => ({
+          ...schema,
+          enabled: enabled.has(schema.id),
+        })),
+        default_schema: mockInputSettings.schema_list[0] ?? MOCK_PROFILE.default_schema,
+      };
+    });
   },
 
   listSnapshots(): Promise<Snapshot[]> {
@@ -401,6 +448,17 @@ export const ipc = {
 
   applyTheme(theme: ThemePreset): Promise<WriteResult> {
     return call("apply_theme", { theme }, () => MOCK_THEME_WRITE_RESULT);
+  },
+
+  getInputSettings(): Promise<InputSettings> {
+    return call("get_input_settings", undefined, () => cloneInputSettings(mockInputSettings));
+  },
+
+  applyInputSettings(settings: InputSettings): Promise<WriteResult> {
+    return call("apply_input_settings", { settings }, () => {
+      mockInputSettings = cloneInputSettings(settings);
+      return { written_files: ["~/Library/Rime/default.custom.yaml"] };
+    });
   },
 
   applyAndDeploy(): Promise<DeployResult> {

@@ -11,6 +11,7 @@
 
 pub mod env;
 pub mod fuzzy;
+pub mod input;
 pub mod manifest;
 pub mod patch;
 pub mod platform;
@@ -22,6 +23,7 @@ pub mod time;
 pub mod workspace;
 
 pub use env::{probe, EnvInfo, InstallationMeta};
+pub use input::{AsciiToggleKey, InputSettings, PageKeys, SettingsError};
 pub use manifest::{Drift, State};
 pub use patch::{apply_edits, CreatePolicy, Edit, PatchError};
 pub use platform::Platform;

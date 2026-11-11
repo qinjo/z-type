@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_yaml::Value;
 
+use qieyun_kit::input::{AsciiToggleKey, InputSettings, PageKeys};
 use qieyun_kit::patch::Edit;
 use qieyun_kit::platform::Platform;
 use qieyun_kit::theme::{Colors, Font, Layout, Orientation, Rgba, Theme};
@@ -139,6 +140,11 @@ pub fn create_snapshot(note: String) -> Result<SnapshotCreatedDto, String> {
 pub fn deploy() -> Result<DeployDto, String> {
     let ctx = Ctx::resolve();
     let _lock = DeployLock::acquire(&Workspace::new(&ctx.user_dir))?;
+    // librime 的 WorkspaceUpdate 按「秒级 mtime」判断配置是否变化；
+    // 同一秒内连续部署会被判定为"无变化"而跳过。这里对齐到下一秒边界，
+    // 保证用户点两次「保存并部署」时第二次一定生效。
+    align_deploy_to_next_second(&ctx);
+
     let deployer = find_deployer().ok_or_else(|| {
         "找不到 rime_deployer。请先运行 scripts/build-librime-macos.sh，或用 QIEYUN_RIME_DEPLOYER 指定路径。"
             .to_string()
@@ -572,4 +578,117 @@ impl Drop for DeployLock {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);
     }
+}
+
+// ---------------------------------------------------------------------------
+// 输入方案与按键（default.custom.yaml）
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize)]
+pub struct InputSettingsDto {
+    schema_list: Vec<String>,
+    page_size: u8,
+    page_keys: PageKeys,
+    toggle_ascii: AsciiToggleKey,
+}
+
+fn read_default_custom(ctx: &Ctx) -> Result<serde_yaml::Value, String> {
+    let path = ctx.user_dir.join("default.custom.yaml");
+    match std::fs::read_to_string(&path) {
+        Ok(text) if !text.trim().is_empty() => {
+            serde_yaml::from_str(&text).map_err(|e| format!("解析 default.custom.yaml 失败：{e}"))
+        }
+        _ => Ok(serde_yaml::Value::Null),
+    }
+}
+
+/// 读取当前输入设置。若 `default.custom.yaml` 里没有 `schema_list`，
+/// 用生效中的方案列表兜底（来自共享/用户 default.yaml）。
+#[tauri::command]
+pub fn get_input_settings() -> Result<InputSettingsDto, String> {
+    let ctx = Ctx::resolve();
+    let root = read_default_custom(&ctx)?;
+    let mut settings = InputSettings::from_yaml(&root);
+
+    if settings.schema_list.is_empty() {
+        let shared = env::detect_shared_dir(&env::shared_dir_candidates());
+        settings.schema_list = profile::schema_list(&ctx.user_dir, shared.as_deref());
+    }
+
+    Ok(InputSettingsDto {
+        schema_list: settings.schema_list,
+        page_size: settings.page_size,
+        page_keys: settings.page_keys,
+        toggle_ascii: settings.toggle_ascii,
+    })
+}
+
+/// 写入方案顺序/候选数/翻页键/中英切换。只替换 GUI 管的那批绑定，用户自建绑定保留。
+#[tauri::command]
+pub fn apply_input_settings(settings: InputSettings) -> Result<WriteDto, String> {
+    settings.validate().map_err(|e| e.to_string())?;
+    let ctx = Ctx::resolve();
+    let root = read_default_custom(&ctx)?;
+    let edits = settings.edits(&root);
+
+    let mut files = BTreeMap::new();
+    files.insert("default.custom.yaml".to_string(), edits);
+
+    let ws = Workspace::new(&ctx.user_dir);
+    let outcome = ws
+        .write_patch(&files, Some("修改方案与按键"))
+        .map_err(|e| e.to_string())?;
+    Ok(WriteDto {
+        written_files: outcome.written_files,
+    })
+}
+
+#[cfg(test)]
+mod input_dto_tests {
+    use super::*;
+
+    #[test]
+    fn settings_deserialize_from_json_contract() {
+        let json = r#"{
+            "schema_list": ["rime_ice", "double_pinyin_flypy"],
+            "page_size": 9,
+            "page_keys": "bracket",
+            "toggle_ascii": "shift_left"
+        }"#;
+        let s: InputSettings = serde_json::from_str(json).unwrap();
+        assert_eq!(s.schema_list.len(), 2);
+        assert_eq!(s.page_size, 9);
+        assert_eq!(s.page_keys, PageKeys::Bracket);
+        assert_eq!(s.toggle_ascii, AsciiToggleKey::ShiftLeft);
+    }
+
+    #[test]
+    fn enums_serialize_to_snake_case() {
+        let dto = InputSettingsDto {
+            schema_list: vec!["a".into()],
+            page_size: 7,
+            page_keys: PageKeys::PageUpDown,
+            toggle_ascii: AsciiToggleKey::ControlShiftSpace,
+        };
+        let json = serde_json::to_string(&dto).unwrap();
+        assert!(json.contains("page_up_down"), "{json}");
+        assert!(json.contains("control_shift_space"), "{json}");
+    }
+}
+
+/// 若距离上次部署不足 1 秒，等到下一秒再部署。
+fn align_deploy_to_next_second(ctx: &Ctx) {
+    let stamp = Workspace::new(&ctx.user_dir).meta_dir().join("last_deploy");
+    let last = std::fs::read_to_string(&stamp)
+        .ok()
+        .and_then(|t| t.trim().parse::<u64>().ok());
+    let now = qieyun_kit::time::now_unix();
+    if let Some(last) = last {
+        if now <= last {
+            let wait_ms = (last + 1 - now) * 1000 + 50;
+            std::thread::sleep(std::time::Duration::from_millis(wait_ms));
+        }
+    }
+    let _ = std::fs::create_dir_all(Workspace::new(&ctx.user_dir).meta_dir());
+    let _ = std::fs::write(stamp, qieyun_kit::time::now_unix().to_string());
 }
