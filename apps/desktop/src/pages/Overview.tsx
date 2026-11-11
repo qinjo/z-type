@@ -4,6 +4,7 @@ import { Card } from "@/components/Card";
 import { Icon } from "@/components/Icon";
 import { PageHeader } from "@/components/PageHeader";
 import { PlaceholderNote } from "@/components/PlaceholderNote";
+import { TakeoverBanner } from "@/components/TakeoverBanner";
 import { healthChecks } from "@/lib/demo-data";
 import { ipc } from "@/lib/ipc";
 import { useIpcQuery } from "@/lib/useIpcQuery";
@@ -44,6 +45,8 @@ export function Overview() {
           </Button>
         }
       />
+
+      <TakeoverBanner onTakenOver={() => snapshots.reload()} />
 
       <div className="grid grid-cols-3 gap-4">
         <Card title="当前方案" description="来自 scan_profile()" actions={<Badge tone="accent">默认</Badge>}>
@@ -152,7 +155,7 @@ export function Overview() {
           </ul>
         </Card>
 
-        <Card title="快捷操作" description="M0 阶段仅打通 mock 调用">
+        <Card title="快捷操作" description="常用入口">
           <div className="grid grid-cols-2 gap-2">
             <Button variant="secondary" className="justify-start">
               <Icon name="deploy" size={15} />
@@ -172,9 +175,9 @@ export function Overview() {
             </Button>
           </div>
           <PlaceholderNote className="mt-4">
-            卡片数据来自 src/lib/ipc.ts 的 mock 实现。Rust 侧实现同名命令后，把
+            数据来自 src/lib/ipc.ts 的类型化调用。检测到
             <code className="mx-1 rounded bg-raised px-1 font-mono text-2xs">__TAURI_INTERNALS__</code>
-            注入后即可自动切换为真实调用。
+            时走真实 Tauri 命令，浏览器中则自动降级为 mock 数据。
           </PlaceholderNote>
         </Card>
       </div>

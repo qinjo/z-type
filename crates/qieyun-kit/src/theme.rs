@@ -40,6 +40,15 @@ impl Rgba {
         format!("0x{:08X}", self.to_abgr())
     }
 
+    /// `#RRGGBB`（不透明时）或 `#RRGGBBAA`，用于前端/导出。
+    pub fn to_hex(self) -> String {
+        if self.a == 255 {
+            format!("#{:02X}{:02X}{:02X}", self.r, self.g, self.b)
+        } else {
+            format!("#{:02X}{:02X}{:02X}{:02X}", self.r, self.g, self.b, self.a)
+        }
+    }
+
     /// 接受 `#RRGGBB`、`#RRGGBBAA`、`RRGGBB`、`0xAABBGGRR`。
     pub fn parse(s: &str) -> Option<Self> {
         let t = s.trim().trim_start_matches('#');
@@ -490,6 +499,16 @@ mod tests {
             "0x44332211"
         );
         assert_eq!(Rgba::rgb(255, 255, 255).to_abgr(), 0xFFFFFFFF);
+    }
+
+    #[test]
+    fn hex_export_roundtrips() {
+        let c = Rgba::rgb(0x11, 0x22, 0x33);
+        assert_eq!(c.to_hex(), "#112233");
+        assert_eq!(Rgba::parse(&c.to_hex()).unwrap(), c);
+        let a = Rgba::with_alpha(0x11, 0x22, 0x33, 0x44);
+        assert_eq!(a.to_hex(), "#11223344");
+        assert_eq!(Rgba::parse(&a.to_hex()).unwrap(), a);
     }
 
     #[test]

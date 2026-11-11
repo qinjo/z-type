@@ -50,3 +50,20 @@ cargo 侧建议：`CARGO_NET_RETRY=10 CARGO_HTTP_TIMEOUT=180 CARGO_HTTP_MULTIPLE
 已验证（2026-11-11）：`QIEYUN_RIME_DEPLOYER=$PWD/.deps/librime-prebuilt/dist/bin/rime_deployer`
 下两份契约测试均通过——GUI 写法写出的 `menu/page_size: 9` 在
 `build/qieyun_test.schema.yaml` 里生效。
+
+## M1.5 / M2 进展（2026-11-11）
+
+- 首启接管：`Workspace::takeover()` = 整包备份 + 建立空托管键清单，**不写任何配置**；
+  `is_taken_over()` 以 `.qieyun/state.json` 是否存在为准。
+- 主题应用：`Workspace::apply_theme(theme, platform)` 写到
+  `squirrel.custom.yaml` / `weasel.custom.yaml`；颜色在 DTO 层统一用 `#RRGGBB(AA)`，
+  编译时转 ABGR（`Rgba::to_abgr_literal()`）。
+- 重要事实：**样式文件不会被 `rime_deployer` 编译进 `build/`**（它由外壳运行时读取），
+  所以"应用主题"之后必须重载外壳；`apply_and_deploy` 先 deploy 再发
+  `Squirrel --reload`（本机已确认 `/Library/Input Methods/Squirrel.app` 存在）。
+- 部署锁：`.qieyun/deploy.lock`（PID + 时间戳，120 秒陈旧判定），避免 GUI 与手动部署撞车。
+- Tauri 命令新增：`get_takeover_plan` / `accept_takeover` / `list_theme_presets` /
+  `apply_theme` / `apply_and_deploy`。
+- GUI 验证：进程与窗口存在（CGWindowList 报告 1180×781 位于 250,118），但本机
+  屏幕捕获权限拿不到窗口像素（`screencapture -l` 报 could not create image from window），
+  界面观感需人工确认。

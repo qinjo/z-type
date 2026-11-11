@@ -11,8 +11,10 @@
 
 ## 现在是什么状态
 
-**M0 骨架阶段**：架构与决策已定稿，领域核心 `crates/qieyun-kit` 的配置写回/主题编译/快照已有测试覆盖；
-Tauri GUI 是 10 个页面的占位壳；平台外壳尚未接入。见 [roadmap](docs/roadmap.md)。
+**M1/M2 阶段**：架构与决策定稿；`crates/qieyun-kit` 覆盖写回/托管键/漂移检测/主题编译/快照/接管；
+Tauri 后端打通环境探测、方案扫描、部署（rime_deployer）、主题应用、首启接管；
+GUI 的概览与外观页已接真实数据，其余页面仍是占位。平台外壳（Squirrel/Weasel fork）尚未接入。
+契约测试可在真实 librime 上验证"GUI 写出的 patch 确实生效"。见 [roadmap](docs/roadmap.md)。
 
 ## 仓库结构
 
@@ -38,8 +40,10 @@ cd apps/desktop && pnpm install && pnpm build && pnpm dev
 接入平台外壳（M0 后半段）：
 
 ```bash
-./scripts/bootstrap-subtrees.sh   # 拉入 Squirrel / Weasel
-./scripts/build-librime-macos.sh  # 构建 librime（macOS）
+./scripts/build-librime-macos.sh  # 准备 librime（官方预编译包，秒级）
+QIEYUN_RIME_DEPLOYER="$PWD/.deps/librime-prebuilt/dist/bin/rime_deployer" \
+  cargo test -p qieyun-kit --test deploy_contract   # 契约测试
+cd apps/desktop && pnpm tauri dev                   # 启动 GUI
 ```
 
 ## 设计要点（三句话）

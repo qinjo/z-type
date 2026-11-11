@@ -14,6 +14,7 @@ import { Schemas } from "@/pages/Schemas";
 import { Shuangpin } from "@/pages/Shuangpin";
 import { cn } from "@/lib/cn";
 import { hasTauriBackend, ipc } from "@/lib/ipc";
+import { TOAST_EVENT, type ToastDetail } from "@/lib/toast";
 
 type PageId =
   | "overview"
@@ -98,6 +99,17 @@ export default function App() {
     const timer = window.setTimeout(() => setToast(null), 3200);
     return () => window.clearTimeout(timer);
   }, [toast]);
+
+  // 页面通过 src/lib/toast.ts 发事件，由布局层的唯一视口统一展示。
+  useEffect(() => {
+    function onToast(event: Event) {
+      const detail = (event as CustomEvent<ToastDetail>).detail;
+      if (!detail?.message) return;
+      setToast({ id: Date.now(), message: detail.message, tone: detail.tone });
+    }
+    window.addEventListener(TOAST_EVENT, onToast);
+    return () => window.removeEventListener(TOAST_EVENT, onToast);
+  }, []);
 
   function navigate(id: PageId) {
     if (window.location.hash !== `#/${id}`) {

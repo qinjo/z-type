@@ -19,6 +19,11 @@ fn main() {
             commands::deploy,
             commands::read_file,
             commands::write_gui_config,
+            commands::get_takeover_plan,
+            commands::accept_takeover,
+            commands::list_theme_presets,
+            commands::apply_theme,
+            commands::apply_and_deploy,
         ])
         .run(tauri::generate_context!())
         .expect("切韵启动失败");

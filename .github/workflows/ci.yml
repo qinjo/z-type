@@ -38,11 +38,16 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
 
-  # 契约测试：需要真实的 librime。M1 起启用。
-  # contract-macos:
-  #   name: 配置语义契约测试（librime 部署 + 读回 build/）
-  #   runs-on: macos-14
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     - run: brew install librime
-  #     - run: LIBRIME_LIB_DIR="$(brew --prefix librime)/lib" cargo test -p qieyun-kit --features contract
+  contract-macos:
+    name: 契约测试（真实 librime 部署 + 读回 build/）
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: 准备 librime（官方预编译包）
+        run: ./scripts/build-librime-macos.sh
+      - name: GUI 写出的 patch 必须被 librime 接受
+        run: |
+          QIEYUN_RIME_DEPLOYER="$PWD/.deps/librime-prebuilt/dist/bin/rime_deployer" \
+            cargo test -p qieyun-kit --test deploy_contract -- --nocapture

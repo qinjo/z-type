@@ -8,8 +8,10 @@ use serde::{Deserialize, Serialize};
 use serde_yaml::Value;
 
 use qieyun_kit::patch::Edit;
+use qieyun_kit::platform::Platform;
+use qieyun_kit::theme::{Colors, Font, Layout, Orientation, Rgba, Theme};
 use qieyun_kit::workspace::Workspace;
-use qieyun_kit::{env, profile, snapshot};
+use qieyun_kit::{env, profile, reload, snapshot};
 
 use crate::paths::Ctx;
 
@@ -95,7 +97,11 @@ pub fn scan_profile() -> Result<ProfileDto, String> {
         schemas: p
             .schemas
             .into_iter()
-            .map(|s| SchemaDto { id: s.id, name: s.name, enabled: s.enabled })
+            .map(|s| SchemaDto {
+                id: s.id,
+                name: s.name,
+                enabled: s.enabled,
+            })
             .collect(),
         themes: p.themes,
         default_schema: p.default_schema.unwrap_or_default(),
@@ -109,7 +115,11 @@ pub fn list_snapshots() -> Result<Vec<SnapshotDto>, String> {
     let items = snapshot::list(&ws.snapshots_dir()).map_err(|e| e.to_string())?;
     Ok(items
         .into_iter()
-        .map(|s| SnapshotDto { id: s.id, created_at: s.created_at, note: s.note })
+        .map(|s| SnapshotDto {
+            id: s.id,
+            created_at: s.created_at,
+            note: s.note,
+        })
         .collect())
 }
 
@@ -118,8 +128,8 @@ pub fn create_snapshot(note: String) -> Result<SnapshotCreatedDto, String> {
     let ctx = Ctx::resolve();
     let ws = Workspace::new(&ctx.user_dir);
     std::fs::create_dir_all(ws.snapshots_dir()).map_err(|e| e.to_string())?;
-    let info = snapshot::create(&ctx.user_dir, &ws.snapshots_dir(), &note)
-        .map_err(|e| e.to_string())?;
+    let info =
+        snapshot::create(&ctx.user_dir, &ws.snapshots_dir(), &note).map_err(|e| e.to_string())?;
     Ok(SnapshotCreatedDto { id: info.id })
 }
 
@@ -128,6 +138,7 @@ pub fn create_snapshot(note: String) -> Result<SnapshotCreatedDto, String> {
 #[tauri::command]
 pub fn deploy() -> Result<DeployDto, String> {
     let ctx = Ctx::resolve();
+    let _lock = DeployLock::acquire(&Workspace::new(&ctx.user_dir))?;
     let deployer = find_deployer().ok_or_else(|| {
         "找不到 rime_deployer。请先运行 scripts/build-librime-macos.sh，或用 QIEYUN_RIME_DEPLOYER 指定路径。"
             .to_string()
@@ -143,10 +154,17 @@ pub fn deploy() -> Result<DeployDto, String> {
 
     let output = cmd.output().map_err(|e| format!("启动部署器失败：{e}"))?;
     let mut log = String::new();
-    log.push_str(&format!("$ {} {:?}\n", deployer.display(), cmd.get_args().collect::<Vec<_>>()));
+    log.push_str(&format!(
+        "$ {} {:?}\n",
+        deployer.display(),
+        cmd.get_args().collect::<Vec<_>>()
+    ));
     log.push_str(&String::from_utf8_lossy(&output.stdout));
     log.push_str(&String::from_utf8_lossy(&output.stderr));
-    Ok(DeployDto { ok: output.status.success(), log })
+    Ok(DeployDto {
+        ok: output.status.success(),
+        log,
+    })
 }
 
 #[tauri::command]
@@ -192,14 +210,21 @@ pub fn write_gui_config(patch: GuiPatch) -> Result<WriteDto, String> {
     let files: BTreeMap<String, Vec<Edit>> = patch
         .files
         .iter()
-        .map(|(name, payloads)| (name.clone(), payloads.iter().cloned().map(Edit::from).collect()))
+        .map(|(name, payloads)| {
+            (
+                name.clone(),
+                payloads.iter().cloned().map(Edit::from).collect(),
+            )
+        })
         .collect();
 
     let ws = Workspace::new(&ctx.user_dir);
     let outcome = ws
         .write_patch(&files, patch.note.as_deref())
         .map_err(|e| e.to_string())?;
-    Ok(WriteDto { written_files: outcome.written_files })
+    Ok(WriteDto {
+        written_files: outcome.written_files,
+    })
 }
 
 /// 查找 `rime_deployer`：环境变量 → PATH → 仓库开发目录。
@@ -218,8 +243,8 @@ fn find_deployer() -> Option<PathBuf> {
         }
     }
     // 开发环境：仓库根下 .deps/librime/dist/bin/rime_deployer
-    let dev = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../.deps/librime/dist/bin/rime_deployer");
+    let dev =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../.deps/librime/dist/bin/rime_deployer");
     dev.is_file().then_some(dev)
 }
 
@@ -240,8 +265,7 @@ mod tests {
         .unwrap();
         assert!(matches!(Edit::from(raw), Edit::SetRaw { .. }));
 
-        let removed: EditPayload =
-            serde_json::from_str(r#"{"op":"remove","key":"a/b"}"#).unwrap();
+        let removed: EditPayload = serde_json::from_str(r#"{"op":"remove","key":"a/b"}"#).unwrap();
         assert!(matches!(Edit::from(removed), Edit::Remove { .. }));
     }
 
@@ -253,5 +277,299 @@ mod tests {
         .unwrap();
         assert_eq!(p.files.len(), 1);
         assert_eq!(p.note.as_deref(), Some("t"));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 首启接管
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize)]
+pub struct TakeoverPlanDto {
+    taken_over: bool,
+    user_dir: String,
+    schema_count: usize,
+    custom_files: Vec<String>,
+    snapshot_dir: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TakeoverResultDto {
+    snapshot_id: String,
+    user_dir: String,
+}
+
+#[tauri::command]
+pub fn get_takeover_plan() -> Result<TakeoverPlanDto, String> {
+    let ctx = Ctx::resolve();
+    let ws = Workspace::new(&ctx.user_dir);
+    let shared = env::detect_shared_dir(&env::shared_dir_candidates());
+    let p = profile::scan(&ctx.user_dir, shared.as_deref());
+    Ok(TakeoverPlanDto {
+        taken_over: ws.is_taken_over(),
+        user_dir: ctx.user_dir.display().to_string(),
+        schema_count: p.schemas.len(),
+        custom_files: p.custom_files,
+        snapshot_dir: ws.snapshots_dir().display().to_string(),
+    })
+}
+
+/// 首启接管：备份 + 建立托管键清单，不改任何配置。
+#[tauri::command]
+pub fn accept_takeover() -> Result<TakeoverResultDto, String> {
+    let ctx = Ctx::resolve();
+    let ws = Workspace::new(&ctx.user_dir);
+    let snap = ws.takeover("首次接管自动备份").map_err(|e| e.to_string())?;
+    Ok(TakeoverResultDto {
+        snapshot_id: snap.id,
+        user_dir: ctx.user_dir.display().to_string(),
+    })
+}
+
+// ---------------------------------------------------------------------------
+// 主题
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FontDto {
+    face: String,
+    point: u16,
+    label_point: u16,
+    line_spacing: u16,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct LayoutDto {
+    /// "horizontal" | "vertical"
+    orientation: String,
+    corner_radius: u16,
+    border_width: u16,
+    margin: u16,
+    spacing: u16,
+    shadow: u16,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ThemeDto {
+    name: String,
+    font: FontDto,
+    layout: LayoutDto,
+    /// 槽位名 → `#RRGGBB(AA)`。
+    colors: BTreeMap<String, String>,
+}
+
+fn theme_to_dto(theme: &Theme) -> ThemeDto {
+    let mut colors = BTreeMap::new();
+    for (key, value) in [
+        ("back", theme.colors.back),
+        ("border", theme.colors.border),
+        ("text", theme.colors.text),
+        ("candidate_text", theme.colors.candidate_text),
+        ("comment_text", theme.colors.comment_text),
+        ("hilited_back", theme.colors.hilited_back),
+        ("hilited_text", theme.colors.hilited_text),
+        (
+            "hilited_candidate_back",
+            theme.colors.hilited_candidate_back,
+        ),
+        (
+            "hilited_candidate_text",
+            theme.colors.hilited_candidate_text,
+        ),
+        (
+            "hilited_candidate_border",
+            theme.colors.hilited_candidate_border,
+        ),
+        ("hilited_border", theme.colors.hilited_border),
+    ] {
+        colors.insert(key.to_string(), value.to_hex());
+    }
+    ThemeDto {
+        name: theme.name.clone(),
+        font: FontDto {
+            face: theme.font.face.clone(),
+            point: theme.font.point,
+            label_point: theme.font.label_point,
+            line_spacing: theme.font.line_spacing,
+        },
+        layout: LayoutDto {
+            orientation: match theme.layout.orientation {
+                Orientation::Horizontal => "horizontal".into(),
+                Orientation::Vertical => "vertical".into(),
+            },
+            corner_radius: theme.layout.corner_radius,
+            border_width: theme.layout.border_width,
+            margin: theme.layout.margin,
+            spacing: theme.layout.spacing,
+            shadow: theme.layout.shadow,
+        },
+        colors,
+    }
+}
+
+fn dto_to_theme(dto: &ThemeDto) -> Result<Theme, String> {
+    let color = |key: &str| -> Result<Rgba, String> {
+        let hex = dto
+            .colors
+            .get(key)
+            .ok_or_else(|| format!("主题缺少颜色槽：{key}"))?;
+        Rgba::parse(hex).ok_or_else(|| format!("颜色格式非法：{key}={hex}"))
+    };
+    Ok(Theme {
+        name: dto.name.clone(),
+        font: Font {
+            face: dto.font.face.clone(),
+            point: dto.font.point,
+            label_point: dto.font.label_point,
+            line_spacing: dto.font.line_spacing,
+        },
+        layout: Layout {
+            orientation: if dto.layout.orientation == "vertical" {
+                Orientation::Vertical
+            } else {
+                Orientation::Horizontal
+            },
+            corner_radius: dto.layout.corner_radius,
+            border_width: dto.layout.border_width,
+            margin: dto.layout.margin,
+            spacing: dto.layout.spacing,
+            shadow: dto.layout.shadow,
+        },
+        colors: Colors {
+            back: color("back")?,
+            border: color("border")?,
+            text: color("text")?,
+            candidate_text: color("candidate_text")?,
+            comment_text: color("comment_text")?,
+            hilited_back: color("hilited_back")?,
+            hilited_text: color("hilited_text")?,
+            hilited_candidate_back: color("hilited_candidate_back")?,
+            hilited_candidate_text: color("hilited_candidate_text")?,
+            hilited_candidate_border: color("hilited_candidate_border")?,
+            hilited_border: color("hilited_border")?,
+        },
+        platform_specific: BTreeMap::new(),
+    })
+}
+
+/// 内置主题预设（前端外观页直接渲染这些）。
+#[tauri::command]
+pub fn list_theme_presets() -> Vec<ThemeDto> {
+    Theme::presets().iter().map(theme_to_dto).collect()
+}
+
+/// 应用主题：编译成目标平台的样式文件并写入（不部署、不重载）。
+#[tauri::command]
+pub fn apply_theme(theme: ThemeDto) -> Result<WriteDto, String> {
+    let ctx = Ctx::resolve();
+    let ws = Workspace::new(&ctx.user_dir);
+    let theme = dto_to_theme(&theme)?;
+    let outcome = ws
+        .apply_theme(&theme, Platform::current(), Some("应用主题"))
+        .map_err(|e| e.to_string())?;
+    Ok(WriteDto {
+        written_files: outcome.written_files,
+    })
+}
+
+/// 部署 + 重载外壳：Windows 由 WeaselDeployer 一并完成；macOS 先 deploy 再发 reload 通知。
+#[tauri::command]
+pub fn apply_and_deploy() -> Result<DeployDto, String> {
+    let deploy = deploy()?;
+    let mut log = deploy.log;
+
+    if deploy.ok {
+        let plan = reload::plan(Platform::current(), Path::new(""));
+        if plan.looks_installed() {
+            match std::process::Command::new(&plan.program)
+                .args(&plan.args)
+                .status()
+            {
+                Ok(status) => log.push_str(&format!(
+                    "\n[reload] {} {:?} → {status}",
+                    plan.program.display(),
+                    plan.args
+                )),
+                Err(e) => log.push_str(&format!("\n[reload] 失败：{e}。{}", plan.fallback_hint)),
+            }
+        } else {
+            log.push_str(&format!(
+                "\n[reload] 未找到外壳：{}。{}",
+                plan.program.display(),
+                plan.fallback_hint
+            ));
+        }
+    }
+
+    Ok(DeployDto { ok: deploy.ok, log })
+}
+
+#[cfg(test)]
+mod theme_dto_tests {
+    use super::*;
+
+    #[test]
+    fn theme_dto_roundtrips_through_presets() {
+        for preset in Theme::presets() {
+            let dto = theme_to_dto(&preset);
+            let back = dto_to_theme(&dto).unwrap();
+            assert_eq!(back, preset, "预设 {} 往返后不一致", preset.name);
+        }
+    }
+
+    #[test]
+    fn invalid_color_is_rejected() {
+        let mut dto = theme_to_dto(&Theme::presets()[0]);
+        dto.colors.insert("back".into(), "not-a-color".into());
+        assert!(dto_to_theme(&dto).is_err());
+    }
+
+    #[test]
+    fn missing_color_slot_is_rejected() {
+        let mut dto = theme_to_dto(&Theme::presets()[0]);
+        dto.colors.remove("text");
+        assert!(dto_to_theme(&dto).is_err());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 部署锁：同一时间只允许一个部署（GUI 实例 / 用户手动部署可能撞车）
+// ---------------------------------------------------------------------------
+
+struct DeployLock {
+    path: PathBuf,
+}
+
+impl DeployLock {
+    /// 陈旧锁（超过 120 秒）视为上一次部署崩溃留下的，直接抢占。
+    fn acquire(ws: &Workspace) -> Result<Self, String> {
+        let dir = ws.meta_dir();
+        std::fs::create_dir_all(&dir).map_err(|e| format!("创建状态目录失败：{e}"))?;
+        let path = dir.join("deploy.lock");
+
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            let stale = text
+                .split_whitespace()
+                .next()
+                .and_then(|ts| ts.parse::<u64>().ok())
+                .map(|ts| qieyun_kit::time::now_unix().saturating_sub(ts) > 120)
+                .unwrap_or(true);
+            if !stale {
+                return Err(format!(
+                    "已有部署在进行中（锁文件：{}）。请等待完成，或删除该文件后重试。",
+                    path.display()
+                ));
+            }
+        }
+
+        let body = format!("{} {}", qieyun_kit::time::now_unix(), std::process::id());
+        std::fs::write(&path, body).map_err(|e| format!("写入部署锁失败：{e}"))?;
+        Ok(DeployLock { path })
+    }
+}
+
+impl Drop for DeployLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
     }
 }

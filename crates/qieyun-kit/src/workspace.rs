@@ -325,3 +325,121 @@ mod tests {
         assert_eq!(out.written_files.len(), 1);
     }
 }
+
+// ---------------------------------------------------------------------------
+// 首启接管与主题应用
+// ---------------------------------------------------------------------------
+
+impl Workspace {
+    /// 是否已经接管过（state.json 存在即视为已接管）。
+    pub fn is_taken_over(&self) -> bool {
+        self.state_path().is_file()
+    }
+
+    /// 首启接管：先整包备份，再建立空的托管键清单。
+    ///
+    /// 不做任何配置写入——接管只是"声明所有权 + 留退路"。
+    pub fn takeover(&self, note: &str) -> Result<crate::snapshot::SnapshotInfo, WriteError> {
+        if !self.user_dir.is_dir() {
+            return Err(WriteError::Io {
+                file: self.user_dir.display().to_string(),
+                source: std::io::Error::new(std::io::ErrorKind::NotFound, "Rime 用户目录不存在"),
+            });
+        }
+        self.ensure_dirs()?;
+        let info = crate::snapshot::create(&self.user_dir, &self.snapshots_dir(), note)
+            .map_err(|e| WriteError::Backup(e.to_string()))?;
+        // 建立清单（空 keys），表示"已接管但还没托管任何键"
+        let state = State::default();
+        state
+            .save(&self.state_path())
+            .map_err(|e| WriteError::State(e.to_string()))?;
+        Ok(info)
+    }
+
+    /// 把一套主题编译并写入目标平台的样式文件。
+    ///
+    /// 注意：样式文件**不会**被 `rime_deployer` 编译进 `build/`，它由外壳在运行时读取，
+    /// 因此写完之后还需要重载外壳（见 ADR-0008）。
+    pub fn apply_theme(
+        &self,
+        theme: &crate::theme::Theme,
+        platform: crate::platform::Platform,
+        note: Option<&str>,
+    ) -> Result<WriteOutcome, WriteError> {
+        let file = match platform {
+            crate::platform::Platform::Macos => "squirrel.custom.yaml",
+            crate::platform::Platform::Windows => "weasel.custom.yaml",
+        };
+        let edits = theme.edits(platform);
+        let mut files = BTreeMap::new();
+        files.insert(file.to_string(), edits);
+        self.write_patch(&files, note)
+    }
+}
+
+#[cfg(test)]
+mod takeover_tests {
+    use super::*;
+    use crate::platform::Platform;
+    use crate::theme::Theme;
+
+    fn ws(tag: &str) -> Workspace {
+        let dir = std::env::temp_dir().join(format!(
+            "qieyun-takeover-{tag}-{}-{}",
+            std::process::id(),
+            crate::time::now_unix()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        Workspace::new(dir)
+    }
+
+    #[test]
+    fn takeover_creates_backup_and_marks_state() {
+        let w = ws("take");
+        std::fs::write(w.user_dir.join("default.custom.yaml"), "patch:\n  a: 1\n").unwrap();
+        assert!(!w.is_taken_over());
+
+        let snap = w.takeover("首次接管").unwrap();
+        assert!(w.is_taken_over());
+        assert!(w.snapshots_dir().join(&snap.id).is_dir());
+        // 接管不写任何用户配置
+        assert_eq!(
+            std::fs::read_to_string(w.user_dir.join("default.custom.yaml")).unwrap(),
+            "patch:\n  a: 1\n"
+        );
+    }
+
+    #[test]
+    fn takeover_requires_existing_user_dir() {
+        let w = Workspace::new("/nonexistent/qieyun-takeover");
+        assert!(w.takeover("x").is_err());
+    }
+
+    #[test]
+    fn apply_theme_writes_platform_style_file() {
+        let w = ws("theme");
+        let theme = &Theme::presets()[0];
+        let out = w.apply_theme(theme, Platform::Macos, None).unwrap();
+        assert_eq!(out.written_files, vec!["squirrel.custom.yaml"]);
+        let text = std::fs::read_to_string(w.user_dir.join("squirrel.custom.yaml")).unwrap();
+        assert!(text.contains("style/color_scheme: qieyun_dark"));
+        assert!(text.contains("back_color: 0xFF1E1E1E"));
+
+        // Windows 目标写另一个文件
+        let out = w.apply_theme(theme, Platform::Windows, None).unwrap();
+        assert_eq!(out.written_files, vec!["weasel.custom.yaml"]);
+    }
+
+    #[test]
+    fn applying_same_theme_twice_is_stable() {
+        let w = ws("theme-idem");
+        let theme = &Theme::presets()[0];
+        w.apply_theme(theme, Platform::Macos, None).unwrap();
+        let first = std::fs::read_to_string(w.user_dir.join("squirrel.custom.yaml")).unwrap();
+        w.apply_theme(theme, Platform::Macos, None).unwrap();
+        let second = std::fs::read_to_string(w.user_dir.join("squirrel.custom.yaml")).unwrap();
+        assert_eq!(first, second);
+    }
+}

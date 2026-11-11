@@ -51,6 +51,66 @@ export interface WriteResult {
   written_files: string[];
 }
 
+/** 首启接管计划：接管只备份 + 登记托管键，不做任何配置写入。 */
+export interface TakeoverPlan {
+  taken_over: boolean;
+  user_dir: string;
+  schema_count: number;
+  custom_files: string[];
+  snapshot_dir: string;
+}
+
+export interface TakeoverResult {
+  snapshot_id: string;
+  user_dir: string;
+}
+
+export interface FontDto {
+  face: string;
+  point: number;
+  label_point: number;
+  line_spacing: number;
+}
+
+export type Orientation = "horizontal" | "vertical";
+
+export interface LayoutDto {
+  orientation: Orientation;
+  corner_radius: number;
+  border_width: number;
+  margin: number;
+  spacing: number;
+  shadow: number;
+}
+
+/**
+ * 主题颜色槽（顺序与 Rust `Colors::entries` 一致）。
+ * 契约里 `colors` 是 `Record<string, string>`，页面应只遍历这个白名单。
+ */
+export const THEME_COLOR_SLOTS = [
+  "back",
+  "border",
+  "text",
+  "candidate_text",
+  "comment_text",
+  "hilited_back",
+  "hilited_text",
+  "hilited_candidate_back",
+  "hilited_candidate_text",
+  "hilited_candidate_border",
+  "hilited_border",
+] as const;
+
+export type ThemeColorSlot = (typeof THEME_COLOR_SLOTS)[number];
+
+export interface ThemePreset {
+  name: string;
+  font: FontDto;
+  layout: LayoutDto;
+  /** 槽位名 -> `#RRGGBB` 或 `#RRGGBBAA`。 */
+  colors: Record<string, string>;
+}
+
 /**
  * `write_gui_config` 的载荷：文件名 → 该文件的编辑序列。
  * 对应 Rust 侧 `commands::GuiPatch`（`op` 用 tag 区分，serde 反序列化）。
@@ -74,6 +134,11 @@ export interface IpcContract {
   deploy: { args: undefined; result: DeployResult };
   read_file: { args: { path: string }; result: FileContent };
   write_gui_config: { args: { patch: GuiPatch }; result: WriteResult };
+  get_takeover_plan: { args: undefined; result: TakeoverPlan };
+  accept_takeover: { args: undefined; result: TakeoverResult };
+  list_theme_presets: { args: undefined; result: ThemePreset[] };
+  apply_theme: { args: { theme: ThemePreset }; result: WriteResult };
+  apply_and_deploy: { args: undefined; result: DeployResult };
 }
 
 export type IpcCommand = keyof IpcContract;
@@ -148,6 +213,81 @@ const MOCK_WRITE_RESULT: WriteResult = {
   written_files: ["~/Library/Rime/default.custom.yaml", "~/Library/Rime/squirrel.custom.yaml"],
 };
 
+/** 主题写回只会落在当前平台的样式文件上。 */
+const MOCK_THEME_WRITE_RESULT: WriteResult = {
+  written_files: ["~/Library/Rime/squirrel.custom.yaml"],
+};
+
+const MOCK_TAKEOVER_PLAN: TakeoverPlan = {
+  taken_over: false,
+  user_dir: "~/Library/Rime",
+  schema_count: 5,
+  custom_files: ["default.custom.yaml"],
+  snapshot_dir: "~/Library/Rime/.qieyun/snapshots",
+};
+
+/** mock 模式下模拟接管状态的变化，让「备份并接管 → 重新拉取」在浏览器里也成立。 */
+let mockTakenOver = false;
+
+const MOCK_THEME_PRESETS: ThemePreset[] = [
+  {
+    name: "Qieyun Dark",
+    font: { face: "PingFang SC", point: 14, label_point: 12, line_spacing: 2 },
+    layout: {
+      orientation: "horizontal",
+      corner_radius: 8,
+      border_width: 1,
+      margin: 8,
+      spacing: 6,
+      shadow: 4,
+    },
+    colors: {
+      back: "#1E1E1E",
+      border: "#FFFFFF1A",
+      text: "#E6E6E6",
+      candidate_text: "#CCCCCC",
+      comment_text: "#8A8A8A",
+      hilited_back: "#2A2A2A",
+      hilited_text: "#FFFFFF",
+      hilited_candidate_back: "#3A6EA5",
+      hilited_candidate_text: "#FFFFFF",
+      hilited_candidate_border: "#00000000",
+      hilited_border: "#00000000",
+    },
+  },
+  {
+    name: "Qieyun Light",
+    font: { face: "PingFang SC", point: 15, label_point: 12, line_spacing: 3 },
+    layout: {
+      orientation: "horizontal",
+      corner_radius: 6,
+      border_width: 1,
+      margin: 8,
+      spacing: 6,
+      shadow: 2,
+    },
+    colors: {
+      back: "#FAFAFA",
+      border: "#0000001A",
+      text: "#1E1E1E",
+      candidate_text: "#333333",
+      comment_text: "#888888",
+      hilited_back: "#ECECEC",
+      hilited_text: "#000000",
+      hilited_candidate_back: "#1B6EF0",
+      hilited_candidate_text: "#FFFFFF",
+      hilited_candidate_border: "#00000000",
+      hilited_border: "#00000000",
+    },
+  },
+];
+
+function mockTakeoverSnapshotId(): string {
+  const now = new Date();
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}`;
+}
+
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -161,9 +301,25 @@ class IpcError extends Error {
     readonly command: IpcCommand,
     readonly cause: unknown,
   ) {
-    super(`IPC 命令 ${command} 调用失败`);
+    // Tauri 的 reject 值通常是后端 `Err(String)` 的中文原文；
+    // 直接透出原文，页面才能把「这些键被手动修改过，已中止写入」之类的信息展示给用户。
+    super(describeError(cause));
     this.name = "IpcError";
   }
+}
+
+function describeError(cause: unknown): string {
+  if (typeof cause === "string" && cause.trim()) return cause;
+  if (cause instanceof Error && cause.message) return cause.message;
+  if (cause && typeof cause === "object") {
+    try {
+      const text = JSON.stringify(cause);
+      if (text && text !== "{}") return text;
+    } catch {
+      // 忽略不可序列化的值，走兜底。
+    }
+  }
+  return String(cause);
 }
 
 async function call<K extends IpcCommand>(
@@ -220,6 +376,35 @@ export const ipc = {
 
   writeGuiConfig(patch: GuiPatch): Promise<WriteResult> {
     return call("write_gui_config", { patch }, () => MOCK_WRITE_RESULT);
+  },
+
+  getTakeoverPlan(): Promise<TakeoverPlan> {
+    return call("get_takeover_plan", undefined, () => ({
+      ...MOCK_TAKEOVER_PLAN,
+      taken_over: mockTakenOver,
+    }));
+  },
+
+  acceptTakeover(): Promise<TakeoverResult> {
+    return call("accept_takeover", undefined, () => {
+      mockTakenOver = true;
+      return {
+        snapshot_id: mockTakeoverSnapshotId(),
+        user_dir: MOCK_TAKEOVER_PLAN.user_dir,
+      };
+    });
+  },
+
+  listThemePresets(): Promise<ThemePreset[]> {
+    return call("list_theme_presets", undefined, () => MOCK_THEME_PRESETS);
+  },
+
+  applyTheme(theme: ThemePreset): Promise<WriteResult> {
+    return call("apply_theme", { theme }, () => MOCK_THEME_WRITE_RESULT);
+  },
+
+  applyAndDeploy(): Promise<DeployResult> {
+    return call("apply_and_deploy", undefined, () => MOCK_DEPLOY_RESULT);
   },
 };
 
