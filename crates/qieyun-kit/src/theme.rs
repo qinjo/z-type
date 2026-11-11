@@ -363,7 +363,7 @@ impl Theme {
     pub fn presets() -> Vec<Theme> {
         vec![
             Theme {
-                name: "Z-Type Dark".into(),
+                name: "Qieyun Dark".into(),
                 font: Font::default(),
                 layout: Layout::default(),
                 colors: Colors {
@@ -382,7 +382,7 @@ impl Theme {
                 platform_specific: BTreeMap::new(),
             },
             Theme {
-                name: "Z-Type Light".into(),
+                name: "Qieyun Light".into(),
                 font: Font::default(),
                 layout: Layout::default(),
                 colors: Colors {
@@ -509,7 +509,7 @@ mod tests {
 
     #[test]
     fn scheme_id_is_yaml_safe() {
-        assert_eq!(Theme::presets()[0].scheme_id(), "z_type_dark");
+        assert_eq!(Theme::presets()[0].scheme_id(), "qieyun_dark");
         let mut t = Theme::presets()[0].clone();
         t.name = "123".into();
         assert_eq!(t.scheme_id(), "t_123");
@@ -523,9 +523,9 @@ mod tests {
         let edits = theme.edits(Platform::Macos);
         let out = apply_edits("", &edits, CreatePolicy::Create).unwrap();
 
-        assert!(out.contains("style/color_scheme: z_type_dark"));
+        assert!(out.contains("style/color_scheme: qieyun_dark"));
         assert!(out.contains("back_color: 0xFF1E1E1E"));
-        assert!(out.contains("preset_color_schemes/z_type_dark:"));
+        assert!(out.contains("preset_color_schemes/qieyun_dark:"));
         assert!(out.contains("style/candidate_list_layout: linear"));
         assert!(out.contains("style/corner_radius: 8"));
         assert!(out.contains("style/font_face: PingFang SC"));
@@ -533,7 +533,7 @@ mod tests {
         // 生成物必须是合法 YAML，且字段可被解析回来
         let root: Value = serde_yaml::from_str(&out).unwrap();
         let patch = root.get("patch").unwrap();
-        let scheme = patch.get("preset_color_schemes/z_type_dark").unwrap();
+        let scheme = patch.get("preset_color_schemes/qieyun_dark").unwrap();
         assert_eq!(
             scheme.get("back_color").and_then(|v| v.as_u64()),
             Some(0xFF1E1E1E)

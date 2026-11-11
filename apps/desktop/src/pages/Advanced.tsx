@@ -60,7 +60,7 @@ export function Advanced() {
           </ul>
         </Card>
 
-        <Card title="行为开关" description="保存后立即写入 rime-studio 的本地配置">
+        <Card title="行为开关" description="保存后立即写入 qieyun-studio 的本地配置">
           {toggles.map((item) => (
             <Field key={item.id} label={item.label} hint={item.hint}>
               <Switch

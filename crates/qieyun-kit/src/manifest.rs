@@ -1,4 +1,4 @@
-//! `.rime-studio/state.json`：GUI 的托管键清单。
+//! `.qieyun-studio/state.json`：GUI 的托管键清单。
 //!
 //! 这是"哪些键归 GUI 所有"的唯一真相来源。不在清单里的键，无论文件里写了什么，
 //! 都视为用户的，GUI 只读不改。
@@ -70,7 +70,7 @@ pub enum StateError {
     Io(#[from] std::io::Error),
     #[error("状态文件格式错误：{0}")]
     Json(#[from] serde_json::Error),
-    #[error("状态文件版本 {found} 高于本程序支持的 {supported}，请升级 Rime Studio")]
+    #[error("状态文件版本 {found} 高于本程序支持的 {supported}，请升级 切韵")]
     UnsupportedVersion { found: u32, supported: u32 },
 }
 

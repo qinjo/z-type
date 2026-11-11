@@ -1,4 +1,4 @@
-//! `rime-kit` —— Rime Studio 的领域核心。
+//! `qieyun-kit` —— 切韵的领域核心。
 //!
 //! 设计原则：
 //! 1. **不依赖 librime**：所有逻辑都是纯 Rust，可在任意机器上 `cargo test`。

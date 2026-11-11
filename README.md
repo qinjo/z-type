@@ -1,4 +1,4 @@
-# z-type · Rime Studio
+# 切韵 · Qieyun（仓库代号 z-type）
 
 一个**把 Rime 配置变简单**的跨平台输入法项目：内核用官方 [librime](https://github.com/rime/librime)，
 外壳 fork 自 [Squirrel](https://github.com/rime/squirrel)（macOS）与 [Weasel](https://github.com/rime/weasel)（Windows），
@@ -11,14 +11,14 @@
 
 ## 现在是什么状态
 
-**M0 骨架阶段**：架构与决策已定稿，领域核心 `crates/rime-kit` 的配置写回/主题编译/快照已有测试覆盖；
+**M0 骨架阶段**：架构与决策已定稿，领域核心 `crates/qieyun-kit` 的配置写回/主题编译/快照已有测试覆盖；
 Tauri GUI 是 10 个页面的占位壳；平台外壳尚未接入。见 [roadmap](docs/roadmap.md)。
 
 ## 仓库结构
 
 | 路径 | 说明 |
 |---|---|
-| `crates/rime-kit/` | 领域核心（纯 Rust，无 FFI）：写回引擎、主题编译、模糊音、快照、重载计划 |
+| `crates/qieyun-kit/` | 领域核心（纯 Rust，无 FFI）：写回引擎、主题编译、模糊音、快照、重载计划 |
 | `apps/desktop/` | Tauri 2 + React 配置工作台 |
 | `platform/macos/` | fork 的 Squirrel（git subtree，尚未接入） |
 | `platform/windows/` | fork 的 Weasel（git subtree，尚未接入） |

@@ -45,4 +45,4 @@ jobs:
   #   steps:
   #     - uses: actions/checkout@v4
   #     - run: brew install librime
-  #     - run: LIBRIME_LIB_DIR="$(brew --prefix librime)/lib" cargo test -p rime-kit --features contract
+  #     - run: LIBRIME_LIB_DIR="$(brew --prefix librime)/lib" cargo test -p qieyun-kit --features contract

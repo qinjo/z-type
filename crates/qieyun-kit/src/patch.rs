@@ -111,7 +111,7 @@ pub fn apply_edits(text: &str, edits: &[Edit], policy: CreatePolicy) -> Result<S
         match policy {
             CreatePolicy::Create => {
                 lines = vec![
-                    "# Managed by Rime Studio. Keys tracked in .rime-studio/state.json may be rewritten;".to_string(),
+                    "# Managed by 切韵. Keys tracked in .qieyun-studio/state.json may be rewritten;".to_string(),
                     "# everything else in this file is yours and is preserved verbatim.".to_string(),
                     "patch:".to_string(),
                 ];
@@ -514,7 +514,7 @@ menu/page_size: 7
             CreatePolicy::Create,
         )
         .unwrap();
-        assert!(out.starts_with("# Managed by Rime Studio"));
+        assert!(out.starts_with("# Managed by 切韵"));
         assert!(out.contains("patch:\n  style/font_point: 12"));
     }
 
@@ -557,11 +557,11 @@ menu/page_size: 7
 
     #[test]
     fn set_raw_keeps_hex_literals_and_is_idempotent() {
-        let raw = "name: Z-Type Dark\nback_color: 0x1E1E1E\ntext_color: 0xE6E6E6";
+        let raw = "name: Qieyun Dark\nback_color: 0x1E1E1E\ntext_color: 0xE6E6E6";
         let edits = vec![Edit::set_raw("preset_color_schemes/ztype_dark", raw)];
         let once = apply_edits(SAMPLE, &edits, CreatePolicy::Reject).unwrap();
         assert!(once.contains(
-            "  preset_color_schemes/ztype_dark:\n    name: Z-Type Dark\n    back_color: 0x1E1E1E"
+            "  preset_color_schemes/ztype_dark:\n    name: Qieyun Dark\n    back_color: 0x1E1E1E"
         ));
         let twice = apply_edits(&once, &edits, CreatePolicy::Reject).unwrap();
         assert_eq!(once, twice);

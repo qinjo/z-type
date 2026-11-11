@@ -81,11 +81,11 @@ mod tests {
     fn custom_install_root_is_respected() {
         let p = plan(
             Platform::Macos,
-            Path::new("/Library/Input Methods/Rime Studio.app"),
+            Path::new("/Library/Input Methods/切韵.app"),
         );
         assert_eq!(
             p.program,
-            PathBuf::from("/Library/Input Methods/Rime Studio.app/Contents/MacOS/Squirrel")
+            PathBuf::from("/Library/Input Methods/切韵.app/Contents/MacOS/Squirrel")
         );
     }
 }

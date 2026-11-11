@@ -11,7 +11,7 @@ git subtree add --prefix=platform/macos https://github.com/rime/squirrel.git \
 
 ## 我们计划的最小改动面
 
-1. 品牌资源与 bundle id（`com.ztype.rime-studio`）、产品名、图标。
+1. 品牌资源与 bundle id（`com.qieyun.studio`）、产品名、图标。
 2. 安装器（`package/`）：改为单 pkg 同装输入法与本项目的 GUI App。
 3. 默认配置模板（随包分发，首次安装时写入用户的共享目录）。
 4. 如需：增加一个稳定的重载入口（当前 `--reload` 已够用，见 ADR-0008）。

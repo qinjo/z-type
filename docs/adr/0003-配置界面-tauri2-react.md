@@ -8,7 +8,7 @@
 ## 决策
 - 壳：Tauri 2（Rust 后端，系统 WebView）。
 - 前端：React 19 + TypeScript + Vite + Tailwind + 手写基础组件；状态用 Zustand。
-- 领域逻辑全部在 `crates/rime-kit`（纯 Rust、可单测），`src-tauri` 只做命令层与平台集成。
+- 领域逻辑全部在 `crates/qieyun-kit`（纯 Rust、可单测），`src-tauri` 只做命令层与平台集成。
 
 ## 备选与代价
 - Electron：体积大、内存高、打包签名链路更重。

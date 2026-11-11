@@ -1,4 +1,4 @@
-//! 快照与回滚：写入前把配置类文件整包复制到 `.rime-studio/snapshots/<stamp>/`。
+//! 快照与回滚：写入前把配置类文件整包复制到 `.qieyun-studio/snapshots/<stamp>/`。
 //!
 //! 只备份配置，不备份 `build/`、`*.userdb`（LevelDB）、`plum/` 等可重建或体积大的内容。
 
@@ -184,7 +184,7 @@ mod tests {
 
     fn tmpdir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "rime-kit-snap-{tag}-{}-{}",
+            "qieyun-kit-snap-{tag}-{}-{}",
             std::process::id(),
             time::now_unix()
         ));

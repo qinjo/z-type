@@ -1,6 +1,6 @@
 [package]
-name = "rime-kit"
-description = "Rime Studio 的领域核心：配置写回、主题编译、模糊音、快照与重载编排"
+name = "qieyun-kit"
+description = "切韵的领域核心：配置写回、主题编译、模糊音、快照与重载编排"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

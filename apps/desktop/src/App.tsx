@@ -140,13 +140,13 @@ export default function App() {
       <aside className="flex w-[236px] shrink-0 flex-col border-r border-line bg-surface">
         <div className="flex items-center gap-2.5 px-4 pb-4 pt-5">
           <div className="flex h-8 w-8 items-center justify-center rounded-md border border-accent/40 bg-accent/10 font-mono text-sm font-semibold text-accent">
-            R
+            韵
           </div>
           <div className="min-w-0">
             <p className="truncate text-[13px] font-semibold tracking-tight text-text">
-              Rime Studio
+              切韵
             </p>
-            <p className="truncate text-2xs text-faint">配置工作台 · M0</p>
+            <p className="truncate text-2xs text-faint">QIEYUN STUDIO · M0</p>
           </div>
         </div>
 
@@ -239,7 +239,7 @@ export default function App() {
           <div className="mx-auto w-full max-w-[1120px] px-6 py-6">
             <Page />
             <footer className="mt-8 flex items-center justify-between border-t border-line-soft pt-4 text-2xs text-faint">
-              <span>Rime Studio · 前端骨架 M0 · 数据为占位 mock</span>
+              <span>切韵 · 前端骨架 M0 · 数据为占位 mock</span>
               <span className="font-mono">Tauri 2 · React 19 · Vite</span>
             </footer>
           </div>

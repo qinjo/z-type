@@ -1,8 +1,8 @@
 {
-  "name": "rime-studio-desktop",
+  "name": "qieyun-desktop",
   "private": true,
   "version": "0.1.0",
-  "description": "Rime Studio — 跨平台 Rime 输入法可视化配置工作台（桌面壳）",
+  "description": "切韵 — 跨平台 Rime 输入法可视化配置工作台（桌面壳）",
   "license": "GPL-3.0-or-later",
   "type": "module",
   "scripts": {

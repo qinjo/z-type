@@ -287,7 +287,7 @@ export const diagnosticsSteps = [
 ];
 
 export const advancedToggles = [
-  { id: "diagnostic", label: "启用诊断日志", hint: "在 ~/Library/Rime 写入 rime-studio.log", enabled: true },
+  { id: "diagnostic", label: "启用诊断日志", hint: "在 ~/Library/Rime 写入 qieyun.log", enabled: true },
   { id: "safe-write", label: "写入前自动快照", hint: "每次保存 custom.yaml 前创建快照", enabled: true },
   { id: "backup-shared", label: "允许修改共享目录", hint: "高风险：会影响所有方案", enabled: false },
   { id: "telemetry", label: "匿名使用统计", hint: "仅上报崩溃与版本号，可随时关闭", enabled: false },

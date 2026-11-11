@@ -1,4 +1,4 @@
-# Rime Studio · 桌面前端骨架（M0）
+# 切韵 · 桌面前端骨架（M0）
 
 跨平台 Rime 输入法可视化配置工作台的前端外壳。技术栈：**Tauri 2 + React 19 + TypeScript + Vite 6 + Tailwind CSS 3**。
 

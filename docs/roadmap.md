@@ -4,7 +4,7 @@
 
 | # | 里程碑 | 产出 | 验收标准（可演示） | 预估 |
 |---|---|---|---|---|
-| M0 | 骨架 | monorepo、CI、`rime-kit` 写回引擎雏形、Tauri GUI 壳（10 页占位）、双端上游子树接入 | `cargo test` 绿；`pnpm build` 绿；macOS 上 `git subtree pull` 后的 Squirrel 能原样编出可安装包；GUI 在 macOS 打开并显示 10 个页面 | 3–4 天 |
+| M0 | 骨架 | monorepo、CI、`qieyun-kit` 写回引擎雏形、Tauri GUI 壳（10 页占位）、双端上游子树接入 | `cargo test` 绿；`pnpm build` 绿；macOS 上 `git subtree pull` 后的 Squirrel 能原样编出可安装包；GUI 在 macOS 打开并显示 10 个页面 | 3–4 天 |
 | M1 | 只读探查 + 部署 + 快照 | `get_env_info` / `scan_profile` / `deploy` / `list_snapshots` / `create_snapshot`；内嵌 librime；部署锁 | 打开 GUI → 看到本机真实方案列表、默认方案、共享目录 → 点"部署"成功并生成 `build/`；点"快照"后能在历史里看到 | 4–6 天 |
 | M1.5 | 首启接管 | 扫描 → 备份 → 文件清单确认 → 接管；多 profile | 在干净机器（或复制一份 `~/Library/Rime`）上走完接管流程；被修改的文件在确认页逐条列出；拒绝则不做任何写入 | 2–3 天 |
 | M2 | 主题 | 统一 Theme 模型 + 双端编译器；内置 4 套预设；实时预览 | 改背景色/圆角/字体/横竖排 → 保存 → 候选窗立即变化；导出主题 JSON 后换机导入还原；契约测试断言 `build/` 里字段值正确 | 3–5 天 |

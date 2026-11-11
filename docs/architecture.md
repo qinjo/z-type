@@ -1,6 +1,6 @@
-# 架构设计：Rime Studio
+# 架构设计：切韵
 
-> 工作名 **Rime Studio**（仓库名 `z-type`）。本文是整个项目的技术契约：任何实现与其冲突时，改实现或先改本文 + 对应 ADR。
+> 对外品牌 **切韵 / Qieyun**（仓库代号 `z-type`）。本文是整个项目的技术契约：任何实现与其冲突时，改实现或先改本文 + 对应 ADR。
 
 ## 1. 目标与非目标
 
@@ -20,12 +20,12 @@
 ## 2. 总体架构
 
 ```
-┌──────────────────────────── Rime Studio (Tauri 2) ────────────────────────────┐
+┌──────────────────────────── 切韵 (Tauri 2) ────────────────────────────┐
 │  React + TS 前端（10 个页面）                                                   │
 │        │  invoke (typed IPC, 无 window.__TAURI__ 时降级为 mock)                 │
 │  src-tauri：命令层（薄）                                                         │
 │        │                                                                        │
-│  crates/rime-kit（纯 Rust 领域核心，可单测）                                      │
+│  crates/qieyun-kit（纯 Rust 领域核心，可单测）                                      │
 │   ├─ patch    文本级写回引擎 + 托管键清单 + 漂移检测                              │
 │   ├─ theme    统一主题模型 → squirrel / weasel 双端编译                           │
 │   ├─ fuzzy    模糊音预设 → speller/algebra 规则                                  │
@@ -56,7 +56,7 @@
 ```
 z-type/
 ├── Cargo.toml                  # Rust workspace（members = crates/*）
-├── crates/rime-kit/            # 领域核心（本仓库自研，BSD 兼容地独立可测）
+├── crates/qieyun-kit/            # 领域核心（本仓库自研，BSD 兼容地独立可测）
 ├── apps/desktop/               # Tauri 2 应用：src-tauri + React 前端
 ├── platform/macos/             # git subtree：rime/squirrel 的 fork
 ├── platform/windows/           # git subtree：rime/weasel 的 fork
@@ -66,7 +66,7 @@ z-type/
 └── .github/workflows/          # CI
 ```
 
-依赖方向：`apps/desktop` → `rime-kit`；`platform/*` 不依赖 Rust 侧；三者仅通过"用户目录里的文件 + reload 通知"耦合。
+依赖方向：`apps/desktop` → `qieyun-kit`；`platform/*` 不依赖 Rust 侧；三者仅通过"用户目录里的文件 + reload 通知"耦合。
 
 ## 4. 配置数据模型与写回契约（本项目最核心的设计）
 
@@ -93,7 +93,7 @@ z-type/
 
 ### 4.3 托管键（managed keys）
 
-GUI 在用户目录下维护 `.rime-studio/state.json`：
+GUI 在用户目录下维护 `.qieyun-studio/state.json`：
 
 ```json
 {
@@ -154,7 +154,7 @@ apply_edits(text, edits) -> new_text
 ### 4.6 原子写与快照
 
 - 写入：写临时文件 → fsync → `rename` 覆盖（同目录，保证原子）；失败回滚。
-- 写前快照：`.rime-studio/snapshots/<ISO8601>/`，只复制配置类文件（`*.yaml`、`*.txt`、`installation.yaml`），排除 `build/`、`*.userdb/`、`plum/`。
+- 写前快照：`.qieyun-studio/snapshots/<ISO8601>/`，只复制配置类文件（`*.yaml`、`*.txt`、`installation.yaml`），排除 `build/`、`*.userdb/`、`plum/`。
 - 快照保留最近 N 份（默认 20）+ 每次"批量修改"另存一份；支持从快照一键恢复（恢复前再存一份当前状态）。
 
 ## 5. 主题模型与双端编译
@@ -203,7 +203,7 @@ struct Theme {
 patch:
   style/color_scheme: ztype_dark
   preset_color_schemes/ztype_dark:
-    name: Z-Type Dark
+    name: Qieyun Dark
     back_color: 0x1E1E1E
     text_color: 0xE6E6E6
     ...
@@ -240,13 +240,13 @@ patch:
 
 ### 6.3 并发与锁
 
-- GUI 侧对"部署"动作加进程内互斥 + 用户目录下 `.rime-studio/deploy.lock`（PID + 时间戳，超时 120s 视为陈旧锁）。
+- GUI 侧对"部署"动作加进程内互斥 + 用户目录下 `.qieyun-studio/deploy.lock`（PID + 时间戳，超时 120s 视为陈旧锁）。
 - 部署期间输入法仍在接受输入（同一用户），librime 允许读 build 产物时被替换；Windows 走 WeaselDeployer 时由其维护维护模式，风险最低。
 - 部署失败时**不回滚已写入的 YAML**（用户可能只想改文件），但 UI 明确提示"文件已改、部署失败"，并提供"回滚到上一快照"按钮。
 
 ## 7. librime 嵌入与 Rust 绑定
 
-**绑定**：`librime-sys` 0.5.0（Rime 作者 lotem 维护，2026-11 更新）+ `rime-kit` 之上的安全封装。不采用 `rime-api`（2024 停更）。
+**绑定**：`librime-sys` 0.5.0（Rime 作者 lotem 维护，2026-11 更新）+ `qieyun-kit` 之上的安全封装。不采用 `rime-api`（2024 停更）。
 
 **暴露面（最小）**：`setup/initialize/finalize`、session 生命周期、`get_commit/get_context/select_candidate`、`config_*` 读写、`deployer_initialize/deploy`、`user_dict`/`sync`。
 
@@ -255,7 +255,7 @@ patch:
 - macOS：照 Squirrel 的 `lib/Makefile` —— deps（marisa/leveldb/opencc/yaml-cpp）编静态库，librime 出 `librime.1.dylib` 放 `Frameworks/`，`CodeSignOnCopy` + `disable-library-validation`。
 - Windows：照 Weasel —— 静态链 `rime.lib`。
 - librime 版本通过 git submodule pin 到同一个 commit，双端一致。
-- `rime-kit` 不依赖 FFI：领域逻辑纯 Rust 可测；FFI 只在 `apps/desktop/src-tauri` 与外壳里。
+- `qieyun-kit` 不依赖 FFI：领域逻辑纯 Rust 可测；FFI 只在 `apps/desktop/src-tauri` 与外壳里。
 
 ## 8. 平台外壳 fork 与上游同步
 
@@ -266,7 +266,7 @@ patch:
 
 ## 9. 打包、签名、分发
 
-- macOS：单个 pkg 同装 IME（`/Library/Input Methods/Rime Studio.app`）与 GUI（`/Applications/Rime Studio.app`）；`pkgbuild` + `productbuild`（多 pkg-ref）+ `productsign` + `notarytool`。必须 Developer ID；未签名在 macOS 13+ 基本不可用（26 上直接拦）。
+- macOS：单个 pkg 同装 IME（`/Library/Input Methods/切韵.app`）与 GUI（`/Applications/切韵.app`）；`pkgbuild` + `productbuild`（多 pkg-ref）+ `productsign` + `notarytool`。必须 Developer ID；未签名在 macOS 13+ 基本不可用（26 上直接拦）。
 - Windows：NSIS 单包同装 WeaselTSF DLL + WeaselServer + GUI；v1 不签名，接受 SmartScreen 提示。
 - 自动更新：v1 不做（Squirrel 自带 Sparkle，可后续接入）。
 
@@ -282,8 +282,8 @@ patch:
 
 ## 11. 测试策略
 
-1. **golden test**（`rime-kit`）：写回幂等、注释与未托管键逐字节保留、缩进/序列/引号渲染。
-2. **契约测试**（CI，macOS job）：`rime-kit` 产出真实配置 → 内嵌 librime 部署 → 读回 `build/` 断言 patch 生效。这是唯一能证明"GUI 产出语义正确"的测试。
+1. **golden test**（`qieyun-kit`）：写回幂等、注释与未托管键逐字节保留、缩进/序列/引号渲染。
+2. **契约测试**（CI，macOS job）：`qieyun-kit` 产出真实配置 → 内嵌 librime 部署 → 读回 `build/` 断言 patch 生效。这是唯一能证明"GUI 产出语义正确"的测试。
 3. **UI 测试**：关键流程（首启接管、主题保存、冲突解决、回滚）用 Playwright/WebDriver 驱动 Tauri。
 4. **冒烟清单**（手工，每次发版）：输入、候选、翻页、中英切换、特殊符号、模糊音生效、双拼生效、主题生效、同步。
 
@@ -296,5 +296,4 @@ patch:
 
 ## 13. 未决
 
-- 产品对外名（仓库名 `z-type` 已定，显示名待定）。
 - 是否在 v2 接 Sparkle 自动更新、是否支持 Linux（fcitx5-rime 用户可复用同一份配置）。

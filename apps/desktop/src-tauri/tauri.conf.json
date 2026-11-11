@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Rime Studio",
+  "productName": "Qieyun Studio",
   "version": "0.1.0",
-  "identifier": "com.ztype.rime-studio",
+  "identifier": "com.qieyun.studio",
   "build": {
     "beforeDevCommand": "pnpm dev",
     "devUrl": "http://localhost:1420",
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Rime Studio",
+        "title": "切韵 · Qieyun Studio",
         "width": 1180,
         "height": 780,
         "minWidth": 960,
@@ -33,7 +33,7 @@
     "targets": "all",
     "category": "Utility",
     "shortDescription": "Rime 输入法可视化配置工作台",
-    "longDescription": "Rime Studio 是一个跨平台的 Rime 输入法可视化配置工作台，读写用户目录下的 *.custom.yaml，并调用 librime 完成校验与部署。",
+    "longDescription": "切韵是一个跨平台的 Rime 输入法可视化配置工作台，读写用户目录下的 *.custom.yaml，并调用 librime 完成校验与部署。",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

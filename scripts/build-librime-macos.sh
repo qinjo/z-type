@@ -4,7 +4,7 @@
 #   <librime>/dist/include/rime_api.h
 #
 # 依赖：Xcode Command Line Tools、cmake、make。
-# 参考 rust 绑定：crates/rime-kit 不使用 FFI，FFI 在 apps/desktop/src-tauri。
+# 参考 rust 绑定：crates/qieyun-kit 不使用 FFI，FFI 在 apps/desktop/src-tauri。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

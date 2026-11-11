@@ -1,8 +1,8 @@
 [package]
-name = "rime-studio"
+name = "qieyun-studio"
 version = "0.1.0"
-description = "Rime Studio — 跨平台 Rime 输入法可视化配置工作台（Tauri 桌面壳）"
-authors = ["Rime Studio contributors"]
+description = "切韵 — 跨平台 Rime 输入法可视化配置工作台（Tauri 桌面壳）"
+authors = ["Qieyun contributors"]
 edition = "2021"
 license = "GPL-3.0-or-later"
 rust-version = "1.80"
