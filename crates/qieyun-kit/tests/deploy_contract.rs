@@ -254,3 +254,78 @@ fn schema_list_controls_what_gets_compiled() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// 证明模糊音真的进入了 librime 的编译产物，且重复应用不会让规则膨胀。
+#[test]
+fn fuzzy_algebra_reaches_compiled_schema() {
+    let Some(deployer) = deployer() else {
+        eprintln!("跳过：未设置 QIEYUN_RIME_DEPLOYER");
+        return;
+    };
+    use qieyun_kit::detail::read_schema_detail;
+    use qieyun_kit::fuzzy::{self, FuzzyGroup};
+
+    let root = tmpdir("fuzzy");
+    let user = root.join("user");
+    std::fs::create_dir_all(&user).unwrap();
+    std::fs::write(
+        user.join("default.yaml"),
+        "schema_list:\n  - schema: qieyun_fuzz\n",
+    )
+    .unwrap();
+    std::fs::write(
+        user.join("qieyun_fuzz.schema.yaml"),
+        "---\nschema:\n  schema_id: qieyun_fuzz\n  name: 模糊音测试\n  version: \"1\"\nspeller:\n  alphabet: abcdefghijklmnopqrstuvwxyz\n  delimiter: \" '\"\n  algebra:\n    - \"erase/^xx$/\"\ntranslator:\n  dictionary: qieyun_fuzz\nmenu:\n  page_size: 5\n",
+    )
+    .unwrap();
+    std::fs::write(
+        user.join("qieyun_fuzz.dict.yaml"),
+        "---\nname: qieyun_fuzz\nversion: \"1\"\nsort: by_weight\n...\n\nzhang\t张\nzhuan\t装\n",
+    )
+    .unwrap();
+
+    // 先部署一次，拿到编译产物里的 algebra
+    assert!(run_deployer(&deployer, &user).status.success());
+    let detail = read_schema_detail(&user, None, "qieyun_fuzz");
+    assert!(detail.source.is_compiled());
+    assert_eq!(detail.algebra, vec!["erase/^xx$/"]);
+
+    // 应用模糊音（zh↔z、n↔l），写入 custom 层
+    let algebra = fuzzy::build(&detail.algebra, &[FuzzyGroup::ZhZ, FuzzyGroup::NL]);
+    let value = serde_yaml::to_value(&algebra).unwrap();
+    let edits = vec![Edit::set("speller/algebra", value)];
+    let text = apply_edits("", &edits, CreatePolicy::Create).unwrap();
+    std::fs::write(user.join("qieyun_fuzz.custom.yaml"), &text).unwrap();
+
+    // librime 的秒级 mtime：跨一秒再部署
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    assert!(run_deployer(&deployer, &user).status.success());
+
+    let after = read_schema_detail(&user, None, "qieyun_fuzz");
+    assert!(
+        after.algebra.iter().any(|r| r == "derive/^zh/z/"),
+        "{:?}",
+        after.algebra
+    );
+    assert!(
+        after.algebra.iter().any(|r| r == "derive/^n/l/"),
+        "{:?}",
+        after.algebra
+    );
+    assert!(
+        after.algebra.iter().any(|r| r == "derive/^l/n/"),
+        "{:?}",
+        after.algebra
+    );
+    assert_eq!(
+        after.algebra.iter().filter(|r| *r == "erase/^xx$/").count(),
+        1,
+        "原始规则不能重复"
+    );
+
+    // 再次应用同样选择：编译产物不应膨胀
+    let rebuilt = fuzzy::build(&after.algebra, &[FuzzyGroup::ZhZ, FuzzyGroup::NL]);
+    assert_eq!(rebuilt, after.algebra, "模糊音应用必须幂等");
+
+    let _ = std::fs::remove_dir_all(&root);
+}

@@ -81,3 +81,15 @@ cargo 侧建议：`CARGO_NET_RETRY=10 CARGO_HTTP_TIMEOUT=180 CARGO_HTTP_MULTIPLE
 - **秒级 mtime 陷阱**：librime 的 `WorkspaceUpdate` 用秒级时间戳判断配置是否变化，
   同一秒内连续部署会被判定为无变化而跳过。产品侧在 `deploy()` 里做秒边界对齐
   （`.qieyun/last_deploy`），测试侧显式跨秒。
+
+## M4：模糊音为什么要"整段重建 algebra"
+
+- 编译产物 `build/<schema>.schema.yaml` 里的 `speller/algebra` 是**展开后**的规则列表，
+  这是唯一可靠的基线（原始 schema 里可能有 `__include`，直接读会读不全）。本机
+  `rime_mint` 编译后 53 条。
+- 应用模糊音 = 从编译产物取基线 → 剥离所有已知模糊音规则 → 按当前勾选重建 →
+  整段写进 `<schema>.custom.yaml` 的 `speller/algebra`。
+  好处：反复保存不会膨胀（已用契约测试证明幂等）；代价：**方案升级后自定义 algebra 会锁定在旧基线**。
+- 因此 UI 必须写明"整段替换"的语义，并在 `source !== build` 时警告"尚未部署，基线可能不完整"。
+- 简繁开关（本机叫 `transcription`）与双拼键位都强耦合方案内容，V1 只读展示，
+  不做生成式编辑——画错键位比不画更危险。

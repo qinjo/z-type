@@ -4,7 +4,7 @@
 
 use std::path::PathBuf;
 
-use qieyun_kit::{env, profile};
+use qieyun_kit::{detail, env, fuzzy, profile};
 
 fn main() {
     let arg = std::env::args().nth(1).map(PathBuf::from);
@@ -51,5 +51,41 @@ fn main() {
     println!("\nGUI 写入面:");
     for f in &p.custom_files {
         println!("  - {f}");
+    }
+
+    if let Some(id) = p.default_schema.clone() {
+        let d = detail::read_schema_detail(&info.user_dir, info.shared_dir.as_deref(), &id);
+        println!(
+            "\n默认方案详情：{} ({})  来源={:?}  algebra={} 条  双拼={}  switches={}",
+            d.name,
+            d.id,
+            d.source,
+            d.algebra.len(),
+            d.is_shuangpin,
+            d.switches.len()
+        );
+        let detected = fuzzy::detect(&d.algebra);
+        println!(
+            "已启用的模糊音：{}",
+            if detected.is_empty() {
+                "（无）".to_string()
+            } else {
+                detected
+                    .iter()
+                    .map(|g| g.label())
+                    .collect::<Vec<_>>()
+                    .join("、")
+            }
+        );
+        let rebuilt = fuzzy::build(&d.algebra, &[fuzzy::FuzzyGroup::ZhZ, fuzzy::FuzzyGroup::NL]);
+        println!(
+            "若勾选 zh↔z + n↔l：algebra 从 {} 条变为 {} 条（幂等：{}）",
+            d.algebra.len(),
+            rebuilt.len(),
+            fuzzy::build(&rebuilt, &[fuzzy::FuzzyGroup::ZhZ, fuzzy::FuzzyGroup::NL]) == rebuilt
+        );
+        if let Some(obj) = d.punctuator.as_object() {
+            println!("punctuator 顶层键：{:?}", obj.keys().collect::<Vec<_>>());
+        }
     }
 }

@@ -2,7 +2,7 @@
 
 跨平台 Rime 输入法可视化配置工作台的前端外壳。技术栈：**Tauri 2 + React 19 + TypeScript + Vite 6 + Tailwind CSS 3**。
 
-本目录是前端工作区，**前端构建（`pnpm build`）完全不依赖 Rust / Cargo**：`src/lib/ipc.ts` 会检测 Tauri 运行时，缺失时自动降级为 mock 数据。首启接管、外观主题、方案与启用、按键已接入真实 Tauri 命令（`get_takeover_plan` / `accept_takeover` / `list_theme_presets` / `apply_theme` / `scan_profile` / `get_input_settings` / `apply_input_settings` / `apply_and_deploy`），其余页面仍为占位。
+本目录是前端工作区，**前端构建（`pnpm build`）完全不依赖 Rust / Cargo**：`src/lib/ipc.ts` 会检测 Tauri 运行时，缺失时自动降级为 mock 数据。首启接管、外观主题、方案与启用、按键、模糊音、双拼、标点已接入真实 Tauri 命令（`get_takeover_plan` / `accept_takeover` / `list_theme_presets` / `apply_theme` / `scan_profile` / `get_input_settings` / `apply_input_settings` / `apply_and_deploy` / `get_schema_detail` / `get_fuzzy_settings` / `apply_fuzzy_settings`），其余页面仍为占位。
 
 ## 快速开始
 
@@ -53,6 +53,17 @@ pnpm tauri build      # 打包（需要图标/签名等发布配置）
 
 > 本轮同样只改 `apps/desktop/src/**` 与本 README（`ipc.ts`、`Schemas.tsx`、`KeyBindings.tsx`），未触碰 `src-tauri/`、`crates/`、`docs/` 与根文件。
 
+### 模糊音 / 双拼 / 标点接线后复验（2026-11-11 晚）
+
+| 命令 | 结果 | 说明 |
+| --- | --- | --- |
+| `pnpm install` | ✅ exit 0 | `Lockfile is up to date` / `Already up to date`；pnpm 10 忽略 esbuild build script 的警告依旧存在，不影响构建 |
+| `pnpm build`（含 `tsc --noEmit`） | ✅ exit 0 | `60 modules transformed`；产物 `dist/index.html` 0.59 kB、CSS 20.57 kB、JS 338.04 kB（gzip 98.96 kB） |
+| `npx tsc --noEmit` | ✅ exit 0 | strict 模式，无错误 |
+| mock 流程冒烟（vite `ssrLoadModule` + `node:assert`） | ✅ | 7 个模糊音组、≥2 个双拼方案、`half_shape`/`full_shape` 示例；`apply_fuzzy_settings` 重复应用幂等、清空后回到原始 algebra；`apply_input_settings` 后 `scan_profile` 的默认方案同步变化 |
+
+> 本轮只改 `apps/desktop/src/**` 与本 README，未触碰 `src-tauri/`、`crates/`、`docs/` 与根文件。
+
 ## 目录结构
 
 ```text
@@ -79,6 +90,7 @@ apps/desktop/
 │   │   ├── ipc.ts            # 类型化 invoke 封装 + mock 降级
 │   │   ├── useIpcQuery.ts    # 极简异步查询 hook
 │   │   ├── theme.ts          # hex 校验 / 规范化 / 主题草稿工具
+│   │   ├── schema.ts         # 方案详情来源提示 + punctuator 只读格式化
 │   │   ├── toast.ts          # 全局 toast 事件通道
 │   │   ├── demo-data.ts      # 各页面静态展示数据
 │   │   └── cn.ts
@@ -99,7 +111,7 @@ apps/desktop/
 | 命令 | 参数 | 返回 |
 | --- | --- | --- |
 | `get_env_info` | — | `{ rime_user_dir, shared_dir, platform, rime_version }` |
-| `scan_profile` | — | `{ schemas: {id,name,enabled}[], themes: string[], default_schema }` |
+| `scan_profile` | — | `{ schemas: {id,name,enabled,is_shuangpin}[], themes: string[], default_schema }` |
 | `list_snapshots` | — | `{id, created_at, note}[]` |
 | `create_snapshot` | `note: string` | `{ id }` |
 | `deploy` | — | `{ ok, log }` |
@@ -111,7 +123,12 @@ apps/desktop/
 | `apply_theme` | `theme: ThemePreset` | `{ written_files: string[] }` |
 | `get_input_settings` | — | `{ schema_list: string[], page_size, page_keys, toggle_ascii }` |
 | `apply_input_settings` | `settings: InputSettings` | `{ written_files: string[] }` |
+| `get_schema_detail` | `{ schema_id?: string }`（缺省 = 当前默认方案） | `{ id, name, source: build\|user\|shared\|missing, algebra: string[], punctuator: unknown, switches: {name,states,reset}[], is_shuangpin }` |
+| `get_fuzzy_settings` | — | `{ schema_id, schema_name, compiled, rule_count, groups: {id,label,rules,enabled}[] }` |
+| `apply_fuzzy_settings` | `{ schema_id, groups: string[] }` | `{ written_files: string[] }` |
 | `apply_and_deploy` | — | `{ ok, log }` |
+
+`get_schema_detail` 的 Rust 签名是 `schema_id: Option<String>`，但命令没有声明 `rename_all = "snake_case"`——Tauri 2 默认按 camelCase 取参数（`schemaId`）。前端 IPC 层在调用时同时携带 `schema_id` 与 `schemaId` 两种拼写，后端将来补上 `rename_all` 也不会坏；`apply_fuzzy_settings` 声明了 `#[tauri::command(rename_all = "snake_case")]`，参数按契约传 snake_case 即可。
 
 `InputSettings` 的枚举均为 snake_case：`page_keys ∈ comma_period / bracket / page_up_down / off`，`toggle_ascii ∈ control_shift_space / shift_left / off`；`page_size` 范围 3–10。`schema_list` 顺序即生效顺序，第一项为默认方案。
 
@@ -127,9 +144,9 @@ apps/desktop/
 | 方案与启用 | 已接线：`scan_profile()` 取全部方案 + `get_input_settings()` 取启用顺序；已启用列表按生效顺序展示（第 1 位即默认方案），支持开关启用/停用、设为默认（移到首位）、候选数量 3–10；保存（`apply_input_settings`）后重新扫描同步状态，保存并部署（`apply_and_deploy` + 可折叠日志）。 |
 | 外观主题 | 预设颜色卡 + 候选窗实时预览 + 字体/布局/11 个颜色槽编辑 + 保存（`apply_theme`）与保存并部署（`apply_and_deploy` + 可折叠日志）。 |
 | 按键 | 已接线：翻页键与中英切换两组单选（每个选项展示实际写入的 Rime 绑定）+ 生成的 `key_binder/bindings` YAML 预览（说明用户其它绑定保留）+ 保存 / 保存并部署（`apply_input_settings` / `apply_and_deploy`）。 |
-| 模糊音 | 平翘舌/前后鼻音/n-l 分组开关 + 生成的 `speller/algebra` 补丁预览 + 风险提示。 |
-| 双拼 | 方案单选、韵母键位网格、编码示例、自定义映射占位。 |
-| 标点与符号 | 半角/全角映射表、预设切换、成对符号/数字全角开关、输入预览。 |
+| 模糊音 | 已接线：`get_fuzzy_settings()` 显示当前默认方案、规则总数与 `compiled` 警告；7 组开关（label + 该组规则原文）+ 实时生成的 `speller/algebra` 片段预览；说明「先剥离旧规则再重建、整段替换、反复保存不膨胀」；保存（`apply_fuzzy_settings`）后重新拉取，保存并部署（`apply_and_deploy` + 可折叠日志）。未选任何组时保存 = 恢复原始 algebra。 |
+| 双拼 | 已接线：从 `scan_profile()` 筛 `is_shuangpin` 方案，展示名称/id/启用/是否默认；「启用 / 设为默认 / 停用」每次先 `get_input_settings()` 读最新再 `apply_input_settings()` 写回（默认方案禁止停用），可选应用后自动部署；右侧只读 `get_schema_detail()` 的 algebra 原文与 `source` 来源提示。明确标注 V1 不提供键位图（键位与 algebra 强耦合，画错比不画更危险）。 |
+| 标点与符号 | 已接线（只读）：`get_schema_detail()`（无参 = 默认方案）的 `punctuator.half_shape` 渲染成「按键 → 输出」两列表格（字符串 / `{commit}` / `{pair}` / 数组统一可读化），`full_shape` 可折叠，`switches` 只读小表格；`punctuator` 缺失或 `source=missing` 时提示继承自 default。V1 不提供编辑。 |
 | 词典 | 统计卡、词典清单（大小/词条/启用）、拖拽导入区、同步状态。 |
 | 高级 | 配置路径清单、行为开关、原始 YAML 只读预览（`read_file`）、危险操作区。 |
 | 诊断与日志 | 体检结果列表、环境信息、检查项范围、带级别的部署日志终端、导出入口。 |
@@ -138,7 +155,9 @@ apps/desktop/
 
 ## 已明确的边界与遗留
 
-- 首启接管、外观主题、方案与启用、按键已接真实 IPC；其余写操作（快照恢复、导入等）仍为占位。顶部「新建快照 / 部署」调用真实命令（无 Tauri 时为 mock），并给出 toast 反馈。
+- 首启接管、外观主题、方案与启用、按键、模糊音、双拼、标点已接真实 IPC；其余写操作（快照恢复、导入、标点编辑等）仍为占位。顶部「新建快照 / 部署」调用真实命令（无 Tauri 时为 mock），并给出 toast 反馈。
+- 模糊音写回会整段替换该方案的 `speller/algebra`（后端先剥离旧的模糊音规则再按当前选择重建）；双拼页只改 `schema_list`，不写 algebra；标点页 V1 只读，等后端能按方案安全 patch `punctuator` 的嵌套键后再开放编辑。
+- `get_schema_detail` 的参数命名存在前后端拼写差异（Rust 未声明 `rename_all = "snake_case"`，Tauri 2 默认 camelCase），前端同时传两种拼写兜底，建议后端补一行 `rename_all = "snake_case"`。
 - 方案与按键页的写回都会经过后端漂移检测：若 `default.custom.yaml` 里托管的键被手动改过，后端返回中文原因并中止写入，页面把原文展示在操作区顶部，不吞错。按键页保存前会重新读取一次最新设置，只替换 `page_keys` / `toggle_ascii`，避免覆写方案页刚保存的 `schema_list` / `page_size`。
 - `src-tauri/` 未执行 `cargo build`，图标为脚本生成的占位 PNG（正式发布需 `pnpm tauri icon` 重新生成并补 `.icns` / `.ico`）。
 - 路由为轻量 hash 路由（`#/overview` 等），未引入 react-router；后续如需要深链接/嵌套路由再替换。

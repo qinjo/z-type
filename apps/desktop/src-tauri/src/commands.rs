@@ -33,6 +33,7 @@ pub struct SchemaDto {
     id: String,
     name: String,
     enabled: bool,
+    is_shuangpin: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -102,6 +103,7 @@ pub fn scan_profile() -> Result<ProfileDto, String> {
                 id: s.id,
                 name: s.name,
                 enabled: s.enabled,
+                is_shuangpin: s.is_shuangpin,
             })
             .collect(),
         themes: p.themes,
@@ -691,4 +693,140 @@ fn align_deploy_to_next_second(ctx: &Ctx) {
     }
     let _ = std::fs::create_dir_all(Workspace::new(&ctx.user_dir).meta_dir());
     let _ = std::fs::write(stamp, qieyun_kit::time::now_unix().to_string());
+}
+
+// ---------------------------------------------------------------------------
+// 方案详情 / 模糊音（M4）
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize)]
+pub struct FuzzyGroupDto {
+    id: String,
+    label: String,
+    rules: Vec<String>,
+    enabled: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FuzzySettingsDto {
+    schema_id: String,
+    schema_name: String,
+    compiled: bool,
+    rule_count: usize,
+    groups: Vec<FuzzyGroupDto>,
+}
+
+fn active_schema_id(ctx: &Ctx) -> String {
+    let shared = env::detect_shared_dir(&env::shared_dir_candidates());
+    profile::schema_list(&ctx.user_dir, shared.as_deref())
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| "rime_ice".to_string())
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn get_schema_detail(
+    schema_id: Option<String>,
+) -> Result<qieyun_kit::detail::SchemaDetail, String> {
+    let ctx = Ctx::resolve();
+    let shared = env::detect_shared_dir(&env::shared_dir_candidates());
+    let id = schema_id.unwrap_or_else(|| active_schema_id(&ctx));
+    Ok(qieyun_kit::detail::read_schema_detail(
+        &ctx.user_dir,
+        shared.as_deref(),
+        &id,
+    ))
+}
+
+#[tauri::command]
+pub fn get_fuzzy_settings() -> Result<FuzzySettingsDto, String> {
+    let ctx = Ctx::resolve();
+    let shared = env::detect_shared_dir(&env::shared_dir_candidates());
+    let id = active_schema_id(&ctx);
+    let detail = qieyun_kit::detail::read_schema_detail(&ctx.user_dir, shared.as_deref(), &id);
+
+    // 优先级：自定义层（用户刚保存的意图） > 编译产物（当前实际生效）。
+    // 这样"保存了但还没部署"时，界面显示的仍然是刚勾选的状态；部署后两者一致。
+    let custom_algebra = std::fs::read_to_string(ctx.user_dir.join(format!("{id}.custom.yaml")))
+        .ok()
+        .and_then(|t| serde_yaml::from_str::<serde_yaml::Value>(&t).ok())
+        .and_then(|root| {
+            root.get("patch")?
+                .get("speller/algebra")?
+                .as_sequence()
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect::<Vec<_>>()
+                })
+        })
+        .unwrap_or_else(|| detail.algebra.clone());
+
+    let enabled = qieyun_kit::fuzzy::detect(&custom_algebra);
+
+    Ok(FuzzySettingsDto {
+        schema_id: detail.id,
+        schema_name: detail.name,
+        compiled: detail.source.is_compiled(),
+        rule_count: detail.algebra.len(),
+        groups: qieyun_kit::fuzzy::FuzzyGroup::ALL
+            .iter()
+            .map(|g| FuzzyGroupDto {
+                id: g.id().to_string(),
+                label: g.label().to_string(),
+                rules: g.rules().iter().map(|r| r.to_string()).collect(),
+                enabled: enabled.contains(g),
+            })
+            .collect(),
+    })
+}
+
+/// 应用模糊音：从编译产物取原始 algebra → 剥离旧规则 → 按选择重建，写入 `<schema>.custom.yaml`。
+#[tauri::command(rename_all = "snake_case")]
+pub fn apply_fuzzy_settings(schema_id: String, groups: Vec<String>) -> Result<WriteDto, String> {
+    use qieyun_kit::fuzzy::{self, FuzzyGroup};
+
+    let parsed: Vec<FuzzyGroup> = groups
+        .iter()
+        .map(|id| FuzzyGroup::from_id(id).ok_or_else(|| format!("未知的模糊音组：{id}")))
+        .collect::<Result<_, _>>()?;
+
+    let ctx = Ctx::resolve();
+    let shared = env::detect_shared_dir(&env::shared_dir_candidates());
+    let detail =
+        qieyun_kit::detail::read_schema_detail(&ctx.user_dir, shared.as_deref(), &schema_id);
+    if detail.algebra.is_empty() {
+        return Err(format!(
+            "读不到方案 {schema_id} 的 speller/algebra——请先在输入法里部署一次，或确认方案已安装。"
+        ));
+    }
+
+    let algebra = fuzzy::build(&detail.algebra, &parsed);
+    let value = serde_yaml::to_value(&algebra).map_err(|e| e.to_string())?;
+
+    let mut files = BTreeMap::new();
+    files.insert(
+        format!("{schema_id}.custom.yaml"),
+        vec![Edit::set("speller/algebra", value)],
+    );
+
+    let ws = Workspace::new(&ctx.user_dir);
+    let outcome = ws
+        .write_patch(&files, Some("修改模糊音"))
+        .map_err(|e| e.to_string())?;
+    Ok(WriteDto {
+        written_files: outcome.written_files,
+    })
+}
+
+#[cfg(test)]
+mod fuzzy_dto_tests {
+    #[test]
+    fn fuzzy_group_ids_match_backend_contract() {
+        for g in qieyun_kit::fuzzy::FuzzyGroup::ALL {
+            assert!(!g.id().is_empty());
+            assert!(!g.rules().is_empty());
+        }
+    }
 }

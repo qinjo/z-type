@@ -20,6 +20,8 @@ pub struct SchemaEntry {
     pub enabled: bool,
     /// 用户目录里是否存在 `<id>.custom.yaml`。
     pub has_custom: bool,
+    /// 是否双拼类方案（id 前缀或显示名判定）。
+    pub is_shuangpin: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,11 +43,16 @@ pub fn scan(user_dir: &Path, shared_dir: Option<&Path>) -> Profile {
 
     let schemas = all_ids
         .into_iter()
-        .map(|id| SchemaEntry {
-            name: schema_name(&id, user_dir, shared_dir).unwrap_or_else(|| id.clone()),
-            enabled: ids.contains(&id),
-            has_custom: user_dir.join(format!("{id}.custom.yaml")).is_file(),
-            id,
+        .map(|id| {
+            let name = schema_name(&id, user_dir, shared_dir).unwrap_or_else(|| id.clone());
+            let is_shuangpin = id.starts_with("double_pinyin") || name.contains("双拼");
+            SchemaEntry {
+                enabled: ids.contains(&id),
+                has_custom: user_dir.join(format!("{id}.custom.yaml")).is_file(),
+                is_shuangpin,
+                name,
+                id,
+            }
         })
         .collect();
 

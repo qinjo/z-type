@@ -24,12 +24,55 @@ export interface SchemaInfo {
   id: string;
   name: string;
   enabled: boolean;
+  /** 后端按「id 以 double_pinyin 开头 / 名称含『双拼』」判定的双拼方案。 */
+  is_shuangpin: boolean;
 }
 
 export interface Profile {
   schemas: SchemaInfo[];
   themes: string[];
   default_schema: string;
+}
+
+/** 方案详情的来源。`build` 是已部署的 librime 编译产物，最可靠。 */
+export type SchemaSource = "build" | "user" | "shared" | "missing";
+
+/** `switches` 项：开关名、状态文案与默认复位值（`reset` 可能缺省）。 */
+export interface SchemaSwitch {
+  name: string;
+  states: string[];
+  reset: number | null;
+}
+
+/** `get_schema_detail()`：只读的方案详情。 */
+export interface SchemaDetail {
+  id: string;
+  name: string;
+  source: SchemaSource;
+  /** `speller/algebra` 规则原文（只保留字符串项）。 */
+  algebra: string[];
+  /** 原始 `punctuator` 结构，可能是 object 或 null，交给页面做只读渲染。 */
+  punctuator: unknown;
+  switches: SchemaSwitch[];
+  is_shuangpin: boolean;
+}
+
+/** 模糊音分组（`groups[].id` 固定为 zh-z / ch-c / sh-s / n-l / f-h / nasal / r-l）。 */
+export interface FuzzyGroup {
+  id: string;
+  label: string;
+  rules: string[];
+  enabled: boolean;
+}
+
+/** `get_fuzzy_settings()`：当前默认方案的模糊音状态。 */
+export interface FuzzySettings {
+  schema_id: string;
+  schema_name: string;
+  /** false 表示读不到 build 产物，规则可能不含 __include 展开。 */
+  compiled: boolean;
+  rule_count: number;
+  groups: FuzzyGroup[];
 }
 
 export interface Snapshot {
@@ -158,6 +201,9 @@ export interface IpcContract {
   apply_theme: { args: { theme: ThemePreset }; result: WriteResult };
   get_input_settings: { args: undefined; result: InputSettings };
   apply_input_settings: { args: { settings: InputSettings }; result: WriteResult };
+  get_schema_detail: { args: { schema_id?: string }; result: SchemaDetail };
+  get_fuzzy_settings: { args: undefined; result: FuzzySettings };
+  apply_fuzzy_settings: { args: { schema_id: string; groups: string[] }; result: WriteResult };
   apply_and_deploy: { args: undefined; result: DeployResult };
 }
 
@@ -190,11 +236,12 @@ const MOCK_ENV: EnvInfo = {
 
 const MOCK_PROFILE: Profile = {
   schemas: [
-    { id: "rime_ice", name: "雾凇拼音", enabled: true },
-    { id: "double_pinyin_flypy", name: "小鹤双拼", enabled: true },
-    { id: "luna_pinyin", name: "朙月拼音", enabled: true },
-    { id: "wubi86", name: "五笔 86", enabled: false },
-    { id: "cangjie5", name: "仓颉五代", enabled: false },
+    { id: "rime_ice", name: "雾凇拼音", enabled: true, is_shuangpin: false },
+    { id: "double_pinyin_flypy", name: "小鹤双拼", enabled: true, is_shuangpin: true },
+    { id: "luna_pinyin", name: "朙月拼音", enabled: true, is_shuangpin: false },
+    { id: "double_pinyin_abc", name: "智能 ABC 双拼", enabled: false, is_shuangpin: true },
+    { id: "wubi86", name: "五笔 86", enabled: false, is_shuangpin: false },
+    { id: "cangjie5", name: "仓颉五代", enabled: false, is_shuangpin: false },
   ],
   themes: ["碧落", "明月", "青瓷", "素笺"],
   default_schema: "rime_ice",
@@ -247,6 +294,186 @@ let mockInputSettings: InputSettings = cloneInputSettings(MOCK_INPUT_SETTINGS);
 function cloneInputSettings(settings: InputSettings): InputSettings {
   return { ...settings, schema_list: [...settings.schema_list] };
 }
+
+// --- 模糊音 / 方案详情 mock -------------------------------------------------
+
+/** 与 Rust `qieyun_kit::fuzzy::FuzzyGroup` 一一对应的 7 个分组（顺序也一致）。 */
+const MOCK_FUZZY_GROUPS: ReadonlyArray<Omit<FuzzyGroup, "enabled">> = [
+  { id: "zh-z", label: "zh ↔ z", rules: ["derive/^zh/z/"] },
+  { id: "ch-c", label: "ch ↔ c", rules: ["derive/^ch/c/"] },
+  { id: "sh-s", label: "sh ↔ s", rules: ["derive/^sh/s/"] },
+  { id: "n-l", label: "n ↔ l", rules: ["derive/^n/l/", "derive/^l/n/"] },
+  { id: "f-h", label: "f ↔ h", rules: ["derive/^f/h/", "derive/^h/f/"] },
+  {
+    id: "nasal",
+    label: "前后鼻音（an/ang、en/eng、in/ing）",
+    rules: [
+      "derive/([aeiou])ng$/$1n/",
+      "derive/([aeiou])n$/$1ng/",
+      "derive/in$/ing/",
+      "derive/ing$/in/",
+    ],
+  },
+  { id: "r-l", label: "r ↔ l", rules: ["derive/^r/l/", "derive/^l/r/"] },
+];
+
+/**
+ * mock 里每个方案「原始」的 algebra（不含模糊音规则）。
+ * 应用模糊音后，`get_schema_detail()` 返回的就是 原始规则 + 勾选组规则，
+ * 与后端「先剥离再重建」的结果保持一致。
+ */
+const MOCK_BASE_ALGEBRA: Record<string, string[]> = {
+  rime_ice: [
+    "derive/^([jqxy])u$/$1v/",
+    "derive/^([a-z]).+$/$1/",
+    "abbrev/^([a-z]).+$/$1/",
+  ],
+  double_pinyin_flypy: ["xform/^([a-z])$/$1/", "derive/^([jqxy])u$/$1v/"],
+  double_pinyin_abc: ["xform/^([a-z])$/$1/"],
+  luna_pinyin: ["derive/^([a-z]).+$/$1/"],
+  wubi86: ["derive/^([a-z]).+$/$1/"],
+};
+
+/** mock 的模糊音状态：schema_id → 已应用的模糊音组 id。 */
+const mockFuzzyApplied: Record<string, string[]> = { rime_ice: ["zh-z"] };
+
+interface MockSchemaDetail {
+  name: string;
+  source: SchemaSource;
+  punctuator: unknown;
+  switches: SchemaSwitch[];
+  is_shuangpin: boolean;
+}
+
+const MOCK_SCHEMA_DETAILS: Record<string, MockSchemaDetail> = {
+  rime_ice: {
+    name: "雾凇拼音",
+    source: "build",
+    punctuator: {
+      half_shape: {
+        " ": " ",
+        ",": "，",
+        ".": "。",
+        "\\": "、",
+        "/": { commit: "/" },
+        "-": { commit: "-" },
+        "[": { pair: ["「", "」"] },
+        "]": { pair: ["『", "』"] },
+        "{": { commit: "「" },
+        "}": { commit: "」" },
+      },
+      full_shape: {
+        " ": { commit: "　" },
+        ",": "，",
+        ".": "。",
+        ":": "：",
+        ";": "；",
+        "!": "！",
+        "?": "？",
+        "(": "（",
+        ")": "）",
+      },
+    },
+    switches: [
+      { name: "ascii_mode", states: ["中文", "英文"], reset: 0 },
+      { name: "full_shape", states: ["半角", "全角"], reset: 0 },
+      { name: "simplification", states: ["简体", "繁體"], reset: 1 },
+      { name: "emoji", states: ["禁止", "允许"], reset: 0 },
+    ],
+    is_shuangpin: false,
+  },
+  double_pinyin_flypy: {
+    name: "小鹤双拼",
+    source: "build",
+    punctuator: null,
+    switches: [{ name: "ascii_mode", states: ["中文", "英文"], reset: 0 }],
+    is_shuangpin: true,
+  },
+  double_pinyin_abc: {
+    name: "智能 ABC 双拼",
+    source: "user",
+    punctuator: null,
+    switches: [],
+    is_shuangpin: true,
+  },
+  luna_pinyin: {
+    name: "朙月拼音",
+    source: "shared",
+    punctuator: null,
+    switches: [{ name: "ascii_mode", states: ["中文", "英文"], reset: 0 }],
+    is_shuangpin: false,
+  },
+};
+
+function mockSchemaName(id: string): string {
+  return (
+    MOCK_SCHEMA_DETAILS[id]?.name ??
+    MOCK_PROFILE.schemas.find((schema) => schema.id === id)?.name ??
+    id
+  );
+}
+
+function mockIsShuangpin(id: string): boolean {
+  return (
+    MOCK_SCHEMA_DETAILS[id]?.is_shuangpin ??
+    MOCK_PROFILE.schemas.find((schema) => schema.id === id)?.is_shuangpin ??
+    false
+  );
+}
+
+function mockFuzzyRules(groupIds: readonly string[]): string[] {
+  return groupIds.flatMap(
+    (id) => MOCK_FUZZY_GROUPS.find((group) => group.id === id)?.rules ?? [],
+  );
+}
+
+/** 当前 mock 的 algebra：原始规则 + 已应用模糊音规则（去重）。 */
+function mockAlgebra(schemaId: string): string[] {
+  const base = MOCK_BASE_ALGEBRA[schemaId] ?? [];
+  const extra = mockFuzzyRules(mockFuzzyApplied[schemaId] ?? []).filter(
+    (rule) => !base.includes(rule),
+  );
+  return [...base, ...extra];
+}
+
+/** 与后端 `fuzzy::detect` 一致：一组规则全部存在才算启用。 */
+function mockDetectFuzzy(algebra: readonly string[]): string[] {
+  return MOCK_FUZZY_GROUPS.filter((group) =>
+    group.rules.every((rule) => algebra.includes(rule)),
+  ).map((group) => group.id);
+}
+
+function mockSchemaDetail(schemaId?: string): SchemaDetail {
+  const id = schemaId ?? mockInputSettings.schema_list[0] ?? MOCK_PROFILE.default_schema;
+  const known = MOCK_SCHEMA_DETAILS[id];
+  return {
+    id,
+    name: mockSchemaName(id),
+    source: known?.source ?? "missing",
+    algebra: known ? mockAlgebra(id) : [],
+    punctuator: known?.punctuator ?? null,
+    switches: known?.switches.map((item) => ({ ...item, states: [...item.states] })) ?? [],
+    is_shuangpin: mockIsShuangpin(id),
+  };
+}
+
+function mockFuzzySettings(): FuzzySettings {
+  const id = mockInputSettings.schema_list[0] ?? MOCK_PROFILE.default_schema;
+  const algebra = mockAlgebra(id);
+  const enabled = mockDetectFuzzy(algebra);
+  return {
+    schema_id: id,
+    schema_name: mockSchemaName(id),
+    compiled: MOCK_SCHEMA_DETAILS[id]?.source === "build",
+    rule_count: algebra.length,
+    groups: MOCK_FUZZY_GROUPS.map((group) => ({
+      ...group,
+      rules: [...group.rules],
+      enabled: enabled.includes(group.id),
+    })),
+  };
+}
+
 
 /** 主题写回只会落在当前平台的样式文件上。 */
 const MOCK_THEME_WRITE_RESULT: WriteResult = {
@@ -458,6 +685,38 @@ export const ipc = {
     return call("apply_input_settings", { settings }, () => {
       mockInputSettings = cloneInputSettings(settings);
       return { written_files: ["~/Library/Rime/default.custom.yaml"] };
+    });
+  },
+
+  getSchemaDetail(schemaId?: string): Promise<SchemaDetail> {
+    // 契约上参数叫 `schema_id`；但 Rust 的 `get_schema_detail(schema_id: Option<String>)`
+    // 没写 `rename_all = "snake_case"`，Tauri 2 默认按 camelCase 取 key（schemaId）。
+    // 这里两种拼写都带上：Tauri 只读它认识的那个键，后端将来补上 rename_all 也不会坏。
+    const args =
+      schemaId === undefined
+        ? ({} as { schema_id?: string })
+        : ({ schema_id: schemaId, schemaId } as { schema_id?: string });
+    return call("get_schema_detail", args, () => mockSchemaDetail(schemaId));
+  },
+
+  getFuzzySettings(): Promise<FuzzySettings> {
+    return call("get_fuzzy_settings", undefined, () => mockFuzzySettings());
+  },
+
+  applyFuzzySettings(schemaId: string, groups: string[]): Promise<WriteResult> {
+    return call("apply_fuzzy_settings", { schema_id: schemaId, groups }, () => {
+      const unknown = groups.find(
+        (id) => !MOCK_FUZZY_GROUPS.some((group) => group.id === id),
+      );
+      if (unknown) throw new Error(`未知的模糊音组：${unknown}`);
+      if (mockAlgebra(schemaId).length === 0) {
+        throw new Error(
+          `读不到方案 ${schemaId} 的 speller/algebra——请先在输入法里部署一次，或确认方案已安装。`,
+        );
+      }
+      // 后端会整段重建 algebra；mock 里记下选择，让重新拉取能看到结果。
+      mockFuzzyApplied[schemaId] = [...groups];
+      return { written_files: [`~/Library/Rime/${schemaId}.custom.yaml`] };
     });
   },
 
