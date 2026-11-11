@@ -1,0 +1,11 @@
+/target
+**/node_modules
+**/dist
+**/.DS_Store
+*.log
+.DS_Store
+# Tauri
+apps/desktop/src-tauri/target
+# 本地环境
+.env
+.env.local
