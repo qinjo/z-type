@@ -14,6 +14,7 @@ use qieyun_kit::theme::{Colors, Font, Layout, Orientation, Rgba, Theme};
 use qieyun_kit::workspace::Workspace;
 use qieyun_kit::{env, profile, reload, snapshot};
 
+use crate::engine;
 use crate::paths::Ctx;
 
 // ---------------------------------------------------------------------------
@@ -1011,4 +1012,87 @@ mod m5_tail_tests {
         assert!(args.get("name").is_some());
         assert!(args.get("content").is_some());
     }
+}
+
+// ---------------------------------------------------------------------------
+// 进程内引擎（librime FFI）
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub fn engine_status() -> engine::EngineStatus {
+    engine::status()
+}
+
+/// 用进程内引擎"试打字"：返回 preedit 与候选，不触碰任何真实输入会话。
+#[tauri::command(rename_all = "snake_case")]
+pub fn preview_typing(keys: String) -> Result<engine::PreviewResult, String> {
+    let ctx = Ctx::resolve();
+    let shared = env::detect_shared_dir(&env::shared_dir_candidates());
+    let (user, shared) = engine::resolve_dirs(&ctx.user_dir, shared.as_deref());
+    engine::preview(&user, &shared, &keys, None, None)
+}
+
+/// 试打字并提交第 index 个候选，返回上屏文本。
+#[tauri::command(rename_all = "snake_case")]
+pub fn preview_commit(keys: String, index: usize) -> Result<Option<String>, String> {
+    let ctx = Ctx::resolve();
+    let shared = env::detect_shared_dir(&env::shared_dir_candidates());
+    let (user, shared) = engine::resolve_dirs(&ctx.user_dir, shared.as_deref());
+    engine::preview_commit(&user, &shared, &keys, index)
+}
+
+/// 进程内部署。链接了 librime 就走 FFI（无子进程、无秒级 mtime 限制），
+/// 否则退回 `rime_deployer` 子进程（保持旧行为可用）。
+#[tauri::command]
+pub fn deploy_in_process() -> Result<DeployDto, String> {
+    let ctx = Ctx::resolve();
+    if !qieyun_ffi::linked() {
+        let mut dto = deploy()?;
+        dto.log = format!(
+            "[deploy] 本次构建未链接 librime，已退回子进程部署。\n{}",
+            dto.log
+        );
+        return Ok(dto);
+    }
+
+    let _lock = DeployLock::acquire(&Workspace::new(&ctx.user_dir))?;
+    let shared = env::detect_shared_dir(&env::shared_dir_candidates());
+    let (user, shared) = engine::resolve_dirs(&ctx.user_dir, shared.as_deref());
+
+    let started = std::time::Instant::now();
+    let result = engine::deploy(&user, &shared);
+    let elapsed_ms = started.elapsed().as_millis();
+
+    let log = match &result {
+        Ok(()) => format!(
+            "[deploy] 进程内部署成功（libre {} · {} ms）\n  user   = {}\n  shared = {}",
+            qieyun_ffi::version(),
+            elapsed_ms,
+            user.display(),
+            shared.display()
+        ),
+        Err(e) => format!(
+            "[deploy] 进程内部署失败（{} ms）：{e}\n  user   = {}\n  shared = {}",
+            elapsed_ms,
+            user.display(),
+            shared.display()
+        ),
+    };
+
+    let log_path = Workspace::new(&ctx.user_dir)
+        .meta_dir()
+        .join("last-deploy.log");
+    let _ = std::fs::create_dir_all(log_path.parent().unwrap_or(std::path::Path::new(".")));
+    let _ = std::fs::write(&log_path, &log);
+
+    Ok(DeployDto {
+        ok: result.is_ok(),
+        log,
+    })
+}
+
+#[tauri::command]
+pub fn shutdown_engine() -> engine::EngineStatus {
+    engine::shutdown();
+    engine::status()
 }

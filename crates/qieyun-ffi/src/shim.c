@@ -143,6 +143,34 @@ int qz_context(qz_engine* e, uintptr_t session, char* preedit, int preedit_cap,
   return count;
 }
 
+// 切换会话选项（ascii_mode / full_shape / transcription 等）。返回 1 成功。
+int qz_set_option(qz_engine* e, uintptr_t session, const char* option, int value) {
+  if (!e || !e->api->set_option || !option) {
+    return 0;
+  }
+  e->api->set_option((RimeSessionId)session, option, value ? True : False);
+  return 1;
+}
+
+int qz_get_option(qz_engine* e, uintptr_t session, const char* option) {
+  if (!e || !e->api->get_option || !option) {
+    return -1;
+  }
+  return e->api->get_option((RimeSessionId)session, option) ? 1 : 0;
+}
+
+// 当前会话使用的方案 id。返回 1 成功。
+int qz_current_schema(qz_engine* e, uintptr_t session, char* out, int cap) {
+  if (!e || !e->api->get_current_schema || cap <= 0) {
+    return 0;
+  }
+  if (!e->api->get_current_schema((RimeSessionId)session, out, (size_t)cap)) {
+    if (cap > 0) out[0] = '\0';
+    return 0;
+  }
+  return 1;
+}
+
 // 选中第 idx 个候选，若产生上屏文本则写入 commit。返回 1 有上屏、0 无、-1 失败。
 int qz_select(qz_engine* e, uintptr_t session, int idx, char* commit, int commit_cap) {
   if (!e || !e->api->select_candidate) {

@@ -7,6 +7,7 @@
 //! 这一层只做参数校验与平台集成（路径、进程、部署器）。
 
 mod commands;
+mod engine;
 mod paths;
 
 fn main() {
@@ -39,6 +40,11 @@ fn main() {
             commands::reset_managed_keys,
             commands::clear_deploy_lock,
             commands::parse_deploy_log,
+            commands::engine_status,
+            commands::preview_typing,
+            commands::preview_commit,
+            commands::deploy_in_process,
+            commands::shutdown_engine,
         ])
         .run(tauri::generate_context!())
         .expect("切韵启动失败");

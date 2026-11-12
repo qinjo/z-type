@@ -29,6 +29,19 @@ int qz_context(qz_engine* e, uintptr_t s, char* p, int pc, char* c, int cc) {
   if (c) c[0] = '\0';
   return -1;
 }
+int qz_set_option(qz_engine* e, uintptr_t s, const char* o, int v) {
+  (void)e; (void)s; (void)o; (void)v;
+  return 0;
+}
+int qz_get_option(qz_engine* e, uintptr_t s, const char* o) {
+  (void)e; (void)s; (void)o;
+  return -1;
+}
+int qz_current_schema(qz_engine* e, uintptr_t s, char* out, int cap) {
+  (void)e; (void)s; (void)cap;
+  if (out) out[0] = '\0';
+  return 0;
+}
 int qz_select(qz_engine* e, uintptr_t s, int i, char* c, int cc) {
   (void)e; (void)s; (void)i; (void)cc;
   if (c) c[0] = '\0';

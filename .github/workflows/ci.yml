@@ -51,3 +51,8 @@ jobs:
         run: |
           QIEYUN_RIME_DEPLOYER="$PWD/.deps/librime-prebuilt/dist/bin/rime_deployer" \
             cargo test -p qieyun-kit --test deploy_contract -- --nocapture
+      - name: 进程内引擎（FFI）打字闭环
+        run: cargo test -p qieyun-ffi -- --nocapture
+      - name: Tauri 后端（含引擎单例与 rpath）
+        working-directory: apps/desktop/src-tauri
+        run: cargo test -- --nocapture

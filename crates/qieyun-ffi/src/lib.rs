@@ -32,6 +32,19 @@ extern "C" {
         candidates: *mut c_char,
         candidates_cap: c_int,
     ) -> c_int;
+    fn qz_set_option(
+        engine: *mut QzEngine,
+        session: usize,
+        option: *const c_char,
+        value: c_int,
+    ) -> c_int;
+    fn qz_get_option(engine: *mut QzEngine, session: usize, option: *const c_char) -> c_int;
+    fn qz_current_schema(
+        engine: *mut QzEngine,
+        session: usize,
+        out: *mut c_char,
+        cap: c_int,
+    ) -> c_int;
     fn qz_select(
         engine: *mut QzEngine,
         session: usize,
@@ -235,6 +248,45 @@ impl Session {
 
     pub fn destroy(mut self, engine: &mut Engine) {
         engine.destroy_session(&mut self);
+    }
+
+    /// 切换会话选项（`ascii_mode`、`full_shape`、`transcription` 等）。
+    pub fn set_option(&self, engine: &mut Engine, option: &str, value: bool) -> bool {
+        let Ok(option) = CString::new(option) else {
+            return false;
+        };
+        unsafe { qz_set_option(engine.raw, self.id, option.as_ptr(), value as c_int) == 1 }
+    }
+
+    /// 读取会话选项；未知选项返回 `None`。
+    pub fn option(&self, engine: &mut Engine, option: &str) -> Option<bool> {
+        let option = CString::new(option).ok()?;
+        match unsafe { qz_get_option(engine.raw, self.id, option.as_ptr()) } {
+            1 => Some(true),
+            0 => Some(false),
+            _ => None,
+        }
+    }
+
+    /// 当前生效的方案 id。
+    pub fn current_schema(&self, engine: &mut Engine) -> Option<String> {
+        let mut buf = [0i8; 256];
+        let ok = unsafe { qz_current_schema(engine.raw, self.id, buf.as_mut_ptr(), 256) };
+        if ok != 1 {
+            return None;
+        }
+        let id = unsafe { CStr::from_ptr(buf.as_ptr()) }.to_string_lossy().into_owned();
+        (!id.is_empty()).then_some(id)
+    }
+
+    /// 把会话里已输入的按键清空（逐个退格更可靠：librime 没有 clear_composition）。
+    pub fn reset(&self, engine: &mut Engine) {
+        for _ in 0..128 {
+            // BackSpace = 0xff08
+            if unsafe { qz_process_key(engine.raw, self.id, 0xff08 as c_int) } != 1 {
+                break;
+            }
+        }
     }
 }
 

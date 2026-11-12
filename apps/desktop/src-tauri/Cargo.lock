@@ -2413,6 +2413,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "qieyun-ffi"
+version = "0.1.0"
+
+[[package]]
 name = "qieyun-kit"
 version = "0.1.0"
 dependencies = [
@@ -2427,6 +2431,7 @@ dependencies = [
 name = "qieyun-studio"
 version = "0.1.0"
 dependencies = [
+ "qieyun-ffi",
  "qieyun-kit",
  "serde",
  "serde_json",

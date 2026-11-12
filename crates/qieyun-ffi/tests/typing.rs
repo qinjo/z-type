@@ -127,3 +127,44 @@ fn deploy_reports_failure_on_missing_dirs() {
     // 所以不强制断言 Err，只断言调用本身是安全的。
     let _ = err;
 }
+
+#[test]
+fn options_and_schema_are_readable() {
+    if !qieyun_ffi::linked() {
+        eprintln!("跳过：本次构建未链接 librime（stub）");
+        return;
+    }
+    let _guard = LIBRIME_LOCK.lock().unwrap();
+
+    let dir = fixture("options");
+    qieyun_ffi::deploy(&dir, &dir).expect("部署");
+    let mut engine = Engine::new(&dir, &dir).expect("初始化引擎");
+    {
+        let mut session = engine.session().expect("会话");
+        assert_eq!(session.current_schema(&mut engine).as_deref(), Some("qieyun_ffi_test"));
+        assert_eq!(session.option(&mut engine, "ascii_mode"), Some(false));
+
+        assert!(session.set_option(&mut engine, "ascii_mode", true));
+        assert_eq!(session.option(&mut engine, "ascii_mode"), Some(true));
+
+        // 英文模式下 librime 对字母键返回"不消费"，由宿主（输入法外壳/预览）自己打出来。
+        // 这是 Rime 的输入法契约，不是 bug：`process_key` 返回 false 表示"这个键我不管"。
+        let accepted = session.type_keys(&mut engine, "abc");
+        assert_eq!(
+            accepted, 0,
+            "ascii_mode 下字母键不应被引擎消费（宿主直出），实际消费了 {accepted} 个"
+        );
+        let ctx = session.context(&mut engine);
+        assert!(ctx.preedit.is_empty(), "英文模式下不应有 preedit：{}", ctx.preedit);
+        assert!(ctx.candidates.is_empty());
+
+        // 复位：关掉英文模式后重新输入仍走拼音
+        session.set_option(&mut engine, "ascii_mode", false);
+        session.reset(&mut engine);
+        session.type_keys(&mut engine, "nihao");
+        let ctx = session.context(&mut engine);
+        assert_eq!(ctx.preedit, "nihao");
+        assert!(ctx.candidates.iter().any(|c| c.text == "你好"));
+    }
+    engine.destroy();
+}

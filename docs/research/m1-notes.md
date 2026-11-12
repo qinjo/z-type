@@ -134,3 +134,22 @@ cargo 侧建议：`CARGO_NET_RETRY=10 CARGO_HTTP_TIMEOUT=180 CARGO_HTTP_MULTIPLE
   2. C shim 的 `qz_select` 在 `free_commit` **之后**才读 `c.text`，被 free 置空 →
      上屏永远返回空。改为先取 `has_text` 再释放。
 - 词典 fixture 踩坑：Rime `*.dict.yaml` 列顺序是 `文字 <tab> 编码 <tab> 权重`（不是编码在前）。
+
+## FFI 接入 Tauri（2026-11-12）
+
+- `apps/desktop/src-tauri/src/engine.rs`：全局 `OnceLock<Mutex<Inner>>` 持有引擎。
+  所有 librime 调用串行；**deploy 前必须先销毁引擎**（`qz_deploy` 内部会 setup+finalize，
+  与存活引擎互相破坏）。目录变化时引擎自动重建，避免拿旧方案瞎跑。
+- `unsafe impl Send for Inner` 是必要的（Tauri 要求 `Mutex<T>: TrySend`），
+  理由写在代码里：指针从不逃出锁，串行正是 librime 要求的使用方式。
+- **rpath 必须由最终二进制的 build script 加**：`qieyun-ffi` 的
+  `cargo:rustc-link-arg` 只作用于它自己的测试二进制，不跨 crate 传播。
+  `src-tauri/build.rs` 同时加：
+  - 开发期：`.deps/librime-prebuilt/dist/lib` 绝对路径；
+  - 打包后：`@executable_path/../Frameworks`。
+  漏掉这步的症状是启动即 `dyld: Library not loaded: @rpath/librime.1.dylib`。
+- 新命令：`engine_status` / `preview_typing` / `preview_commit` /
+  `deploy_in_process` / `shutdown_engine`。未链接 librime 时 `deploy_in_process`
+  自动退回子进程部署，行为不退化。
+- **契约（写进测试）**：`ascii_mode` 下 librime 对字母键返回"不消费"（process_key=false），
+  由宿主直接打字。所以"预览"里 accepted_keys 可能小于按键数——这不是 bug。
