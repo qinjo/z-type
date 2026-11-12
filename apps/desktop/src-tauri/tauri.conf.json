@@ -39,6 +39,12 @@
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.png"
-    ]
+    ],
+    "macOS": {
+      "files": {
+        "Frameworks/librime.1.dylib": "../../../.deps/librime-prebuilt/dist/lib/librime.1.17.0.dylib"
+      },
+      "minimumSystemVersion": "13.0"
+    }
   }
 }

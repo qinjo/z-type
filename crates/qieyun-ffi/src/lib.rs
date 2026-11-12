@@ -275,7 +275,9 @@ impl Session {
         if ok != 1 {
             return None;
         }
-        let id = unsafe { CStr::from_ptr(buf.as_ptr()) }.to_string_lossy().into_owned();
+        let id = unsafe { CStr::from_ptr(buf.as_ptr()) }
+            .to_string_lossy()
+            .into_owned();
         (!id.is_empty()).then_some(id)
     }
 

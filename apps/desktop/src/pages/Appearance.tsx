@@ -8,6 +8,7 @@ import { Field } from "@/components/Field";
 import { Icon } from "@/components/Icon";
 import { NumberInput } from "@/components/NumberInput";
 import { PageHeader } from "@/components/PageHeader";
+import { Switch } from "@/components/Switch";
 import { cn } from "@/lib/cn";
 import {
   THEME_COLOR_SLOTS,
@@ -15,6 +16,7 @@ import {
   type DeployResult,
   type FontDto,
   type LayoutDto,
+  type PreviewTypingResult,
   type ThemeColorSlot,
   type ThemePreset,
   type WriteResult,
@@ -65,15 +67,57 @@ function themeSignature(theme: ThemePreset): string {
 
 type Busy = "save" | "deploy" | null;
 
+/** 「真实候选」输入框的防抖时长：连打时只发最后一次 preview_typing。 */
+const PREVIEW_DEBOUNCE_MS = 300;
+
 export function Appearance() {
   const presets = useIpcQuery(() => ipc.listThemePresets());
+  /** 进程内引擎状态：`linked=false`（stub 构建）时真实候选不可用。 */
+  const engine = useIpcQuery(() => ipc.engineStatus());
   const [draft, setDraft] = useState<ThemePreset | null>(null);
   const [busy, setBusy] = useState<Busy>(null);
   const [invalidSlots, setInvalidSlots] = useState<ThemeColorSlot[]>([]);
   const [actionError, setActionError] = useState<string | null>(null);
   const [writtenFiles, setWrittenFiles] = useState<string[]>([]);
   const [deploy, setDeploy] = useState<DeployResult | null>(null);
+  const [deploySource, setDeploySource] = useState<"apply" | "engine">("apply");
   const [logOpen, setLogOpen] = useState(false);
+
+  // 真实候选预览：开关默认打开（仅引擎已链接时生效），输入串防抖 300ms。
+  const [realCandidates, setRealCandidates] = useState(true);
+  const [previewKeysInput, setPreviewKeysInput] = useState("nihao");
+  const [previewKeys, setPreviewKeys] = useState("nihao");
+  const [engineBusy, setEngineBusy] = useState<"deploy" | null>(null);
+
+  useEffect(() => {
+    const timer = window.setTimeout(
+      () => setPreviewKeys(previewKeysInput.trim()),
+      PREVIEW_DEBOUNCE_MS,
+    );
+    return () => window.clearTimeout(timer);
+  }, [previewKeysInput]);
+
+  const engineLinked = engine.data?.linked === true;
+  /** 真实候选是否真正生效：开关打开 **且** 本次构建链接了 librime。 */
+  const effectiveReal = engineLinked && realCandidates;
+
+  // 只在需要时发 IPC：未链接 / 开关关闭 / 输入为空都返回 null，交给静态预览兜底。
+  const livePreview = useIpcQuery<PreviewTypingResult | null>(
+    () =>
+      effectiveReal && previewKeys
+        ? ipc.previewTyping(previewKeys)
+        : Promise.resolve(null),
+    [effectiveReal, previewKeys],
+  );
+
+  const previewData = effectiveReal ? livePreview.data : null;
+  const previewEmpty =
+    previewData !== null &&
+    previewData.candidates.length === 0 &&
+    previewData.preedit !== "";
+  /** 英文模式下 librime 不消费字母键 —— 这是契约允许的行为，不是错误。 */
+  const acceptedShort =
+    previewData !== null && previewData.accepted_keys < previewKeys.length;
 
   // 首次加载 / 重新拉取后，把第一个预设载入为可编辑草稿（已有同名草稿则保留用户编辑）。
   useEffect(() => {
@@ -176,6 +220,7 @@ export function Appearance() {
     if (!draft || busy) return;
     setBusy("deploy");
     setDeploy(null);
+    setDeploySource("apply");
     try {
       const applied = await applyDraft();
       if (!applied) return;
@@ -191,6 +236,33 @@ export function Appearance() {
       toast("保存并部署失败", "danger");
     } finally {
       setBusy(null);
+    }
+  }
+
+  /**
+   * 进程内部署：候选为空（未部署 / 方案未编译）时的就地修复动作。
+   * 失败时后端会自动退回子进程部署，所以这里的失败文案只提示看日志。
+   */
+  async function deployInProcess() {
+    if (engineBusy) return;
+    setEngineBusy("deploy");
+    setActionError(null);
+    try {
+      const result = await ipc.deployInProcess();
+      setDeploy(result);
+      setDeploySource("engine");
+      setLogOpen(!result.ok);
+      toast(
+        result.ok ? "进程内部署完成，正在重试真实候选" : "进程内部署失败，请查看日志",
+        result.ok ? "ok" : "danger",
+      );
+      livePreview.reload();
+      engine.reload();
+    } catch (error) {
+      setActionError(errorMessage(error));
+      toast("进程内部署失败", "danger");
+    } finally {
+      setEngineBusy(null);
     }
   }
 
@@ -233,6 +305,16 @@ export function Appearance() {
         description="选择候选窗配色、字体与布局。所有改动写入 squirrel.custom.yaml（macOS）/ weasel.custom.yaml（Windows）。"
         actions={
           <>
+            {engine.data &&
+              (engine.data.linked ? (
+                <Badge tone="ok" dot>
+                  引擎 {engine.data.version}
+                </Badge>
+              ) : (
+                <Badge tone="neutral" dot>
+                  未链接 librime
+                </Badge>
+              ))}
             <Button
               size="sm"
               variant="ghost"
@@ -335,14 +417,108 @@ export function Appearance() {
 
         <Card
           title="候选窗预览"
-          description={`${activePreset.name} · 实时渲染（改一个值马上可见）`}
+          description={
+            effectiveReal
+              ? `${activePreset.name} · 真实引擎候选，样式仍取当前编辑值（改一个值马上可见）`
+              : `${activePreset.name} · 静态示例候选，样式实时渲染（改一个值马上可见）`
+          }
           actions={
-            <Badge tone="accent" dot>
-              Preview
-            </Badge>
+            <div className="flex items-center gap-2">
+              <span className="text-2xs text-faint">真实候选</span>
+              <Switch
+                checked={effectiveReal}
+                onChange={setRealCandidates}
+                label="使用真实引擎候选"
+                disabled={!engineLinked}
+              />
+            </div>
           }
         >
-          <CandidatePreview theme={activePreset} />
+          <div className="space-y-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <label htmlFor="appearance-preview-keys" className="text-2xs text-faint">
+                试打字
+              </label>
+              <input
+                id="appearance-preview-keys"
+                type="text"
+                value={previewKeysInput}
+                spellCheck={false}
+                autoComplete="off"
+                disabled={!effectiveReal}
+                aria-label="预览输入串"
+                placeholder="nihao"
+                onChange={(event) => setPreviewKeysInput(event.target.value)}
+                className="h-7 w-40 rounded-md border border-line bg-raised px-2 font-mono text-xs text-text outline-none focus:border-accent/60 disabled:opacity-45"
+              />
+              <span className="text-2xs text-faint">输入防抖 300ms</span>
+            </div>
+
+            {!engineLinked && (
+              <p className="text-2xs leading-5 text-faint">
+                {engine.data
+                  ? "本次构建未链接 librime（stub）：预览使用静态示例候选，接入真实引擎后会自动显示实际候选。"
+                  : "读取引擎状态…"}
+              </p>
+            )}
+
+            {effectiveReal && livePreview.error && (
+              <div className="flex items-start justify-between gap-3 rounded-md border border-warn/35 bg-warn/10 px-2.5 py-2">
+                <p className="min-w-0 whitespace-pre-wrap break-words text-2xs leading-5 text-warn">
+                  真实候选读取失败：{livePreview.error}（已回退静态示例候选）
+                </p>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={livePreview.reload}
+                  disabled={livePreview.loading}
+                >
+                  重试
+                </Button>
+              </div>
+            )}
+
+            {effectiveReal && previewEmpty && (
+              <div className="flex items-start justify-between gap-3 rounded-md border border-warn/35 bg-warn/10 px-2.5 py-2">
+                <p className="min-w-0 text-2xs leading-5 text-warn">
+                  引擎收到了「{previewData?.preedit}」但没有候选：可能尚未部署或方案未编译，点「进程内部署」按钮试试。
+                </p>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onClick={deployInProcess}
+                  disabled={engineBusy !== null}
+                >
+                  {engineBusy === "deploy" ? "部署中…" : "进程内部署"}
+                </Button>
+              </div>
+            )}
+
+            {effectiveReal && previewData && (
+              <p className="text-2xs text-faint">
+                方案{" "}
+                <span className="font-mono text-muted">{previewData.schema ?? "—"}</span>
+                {" · 按键 "}
+                <span
+                  className={cn("tabular", acceptedShort ? "text-warn" : "text-muted")}
+                  title="引擎消费的按键数 / 输入串长度"
+                >
+                  {previewData.accepted_keys} / {previewKeys.length}
+                </span>
+                {" · 候选 "}
+                <span className="tabular text-muted">{previewData.candidates.length}</span>
+              </p>
+            )}
+
+            {effectiveReal && acceptedShort && (
+              <p className="text-2xs leading-5 text-faint">
+                英文模式下按键由系统直出，引擎不参与（引擎只消费了{" "}
+                {previewData?.accepted_keys} / {previewKeys.length} 个按键），这不是错误。
+              </p>
+            )}
+
+            <CandidatePreview theme={activePreset} preview={previewData} />
+          </div>
         </Card>
       </div>
 
@@ -488,7 +664,9 @@ export function Appearance() {
       {deploy && (
         <Card
           title="部署日志"
-          description={`apply_and_deploy() · ${deploy.ok ? "部署成功" : "部署失败"}`}
+          description={`${
+            deploySource === "engine" ? "deploy_in_process() · 进程内部署" : "apply_and_deploy()"
+          } · ${deploy.ok ? "部署成功" : "部署失败"}`}
           actions={
             <div className="flex items-center gap-2">
               <Badge tone={deploy.ok ? "ok" : "danger"} dot>
@@ -501,9 +679,13 @@ export function Appearance() {
           }
         >
           <p className={cn("text-xs leading-5", deploy.ok ? "text-muted" : "text-danger")}>
-            {deploy.ok
-              ? `主题已写入${writtenFiles.length > 0 ? ` ${writtenFiles.join("、")}` : ""}，并已触发外壳重载。`
-              : "部署未成功。可在「诊断与日志」查看详情，或稍后手动重新部署；主题文件本身已写入。"}
+            {deploySource === "engine"
+              ? deploy.ok
+                ? "已在当前进程内完成部署（librime 直连，无子进程）；引擎已销毁，下次预览会自动重建。"
+                : "进程内部署未成功；展开日志看原因，或稍后在「诊断与日志」里重试。"
+              : deploy.ok
+                ? `主题已写入${writtenFiles.length > 0 ? ` ${writtenFiles.join("、")}` : ""}，并已触发外壳重载。`
+                : "部署未成功。可在「诊断与日志」查看详情，或稍后手动重新部署；主题文件本身已写入。"}
           </p>
           {logOpen && (
             <pre

@@ -1,17 +1,36 @@
-import { THEME_COLOR_SLOTS, type ThemePreset } from "@/lib/ipc";
+import {
+  THEME_COLOR_SLOTS,
+  type PreviewCandidate,
+  type PreviewTypingResult,
+  type ThemePreset,
+} from "@/lib/ipc";
 import { alphaOf, cssColor, normalizeHex } from "@/lib/theme";
 
 interface CandidatePreviewProps {
   theme: ThemePreset;
+  /**
+   * 真实引擎候选（`preview_typing()` 的返回值）。缺省或候选为空时退回静态示例候选，
+   * 保证 stub 构建 / 尚未部署时预览不会空白。
+   */
+  preview?: PreviewTypingResult | null;
+  /** 静态示例候选（回退用），默认与旧版一致。 */
+  fallbackCandidates?: string[];
 }
 
-const CANDIDATES = ["你好", "拟好", "你", "尼", "泥"];
+const STATIC_CANDIDATES = ["你好", "拟好", "你", "尼", "泥"];
 
 /**
  * 候选窗实时预览：用当前编辑值直接渲染一个假的 Squirrel/Weasel 候选窗，
  * 让字号、圆角、边框、横竖排、配色改一个值立刻可见。
+ *
+ * 传入 `preview` 时候选文字来自真实引擎，但**样式始终取当前编辑中的主题值**——
+ * 「改颜色立刻看到效果」的产品价值不变，同时也看得到真实候选内容。
  */
-export function CandidatePreview({ theme }: CandidatePreviewProps) {
+export function CandidatePreview({
+  theme,
+  preview = null,
+  fallbackCandidates = STATIC_CANDIDATES,
+}: CandidatePreviewProps) {
   const { font, layout } = theme;
   const colors = theme.colors;
 
@@ -35,6 +54,15 @@ export function CandidatePreview({ theme }: CandidatePreviewProps) {
 
   const missing = THEME_COLOR_SLOTS.filter((slot) => !normalizeHex(colors[slot] ?? ""));
 
+  // 真实候选优先；为空（未部署 / 方案未编译 / stub）时回退静态示例，避免预览开天窗。
+  const liveCandidates = preview?.candidates ?? [];
+  const candidates: PreviewCandidate[] =
+    liveCandidates.length > 0
+      ? liveCandidates
+      : fallbackCandidates.map((text) => ({ text, comment: "" }));
+  const preedit = preview?.preedit ?? "";
+  const schema = preview?.schema ?? null;
+
   return (
     <div className="space-y-2">
       <div className="flex min-h-[172px] items-start justify-center rounded-md border border-line-soft bg-[#0b0e13] p-5">
@@ -56,22 +84,37 @@ export function CandidatePreview({ theme }: CandidatePreviewProps) {
             opacity: back === "transparent" ? 1 : undefined,
           }}
         >
-          {/* 输入码：后半段为高亮输入区 */}
+          {/* 输入码：真实引擎的 preedit 整段作为高亮输入串；没有引擎时保持静态的 ni|hao 演示 */}
           <div
             className="flex items-baseline gap-1"
             style={{ marginBottom: Math.max(2, layout.spacing), color: textColor }}
           >
-            <span>ni</span>
-            <span
-              style={{
-                backgroundColor: hilitedBack,
-                color: hilitedText,
-                borderRadius: Math.max(2, Math.round(layout.corner_radius / 2)),
-                padding: "0 2px",
-              }}
-            >
-              hao
-            </span>
+            {preedit ? (
+              <span
+                style={{
+                  backgroundColor: hilitedBack,
+                  color: hilitedText,
+                  borderRadius: Math.max(2, Math.round(layout.corner_radius / 2)),
+                  padding: "0 2px",
+                }}
+              >
+                {preedit}
+              </span>
+            ) : (
+              <>
+                <span>ni</span>
+                <span
+                  style={{
+                    backgroundColor: hilitedBack,
+                    color: hilitedText,
+                    borderRadius: Math.max(2, Math.round(layout.corner_radius / 2)),
+                    padding: "0 2px",
+                  }}
+                >
+                  hao
+                </span>
+              </>
+            )}
           </div>
 
           {/* 候选列表 */}
@@ -84,11 +127,11 @@ export function CandidatePreview({ theme }: CandidatePreviewProps) {
               alignItems: vertical ? "flex-start" : "baseline",
             }}
           >
-            {CANDIDATES.map((candidate, index) => {
+            {candidates.map((candidate, index) => {
               const hilited = index === 0;
               return (
                 <span
-                  key={candidate}
+                  key={`${index}-${candidate.text}`}
                   className="flex items-baseline gap-1 whitespace-nowrap"
                   style={
                     hilited
@@ -111,13 +154,24 @@ export function CandidatePreview({ theme }: CandidatePreviewProps) {
                   >
                     {index + 1}
                   </span>
-                  <span>{candidate}</span>
+                  <span>{candidate.text}</span>
+                  {candidate.comment && (
+                    <span
+                      style={{
+                        color: hilited ? hilitedCandidateText : commentColor,
+                        fontSize: font.label_point,
+                        lineHeight: 1.2,
+                      }}
+                    >
+                      {candidate.comment}
+                    </span>
+                  )}
                 </span>
               );
             })}
           </div>
 
-          {/* 状态栏 */}
+          {/* 状态栏：有真实方案时显示引擎当前方案，否则保持静态示例 */}
           <div
             className="flex items-center justify-between gap-4"
             style={{
@@ -129,8 +183,10 @@ export function CandidatePreview({ theme }: CandidatePreviewProps) {
               lineHeight: 1.2,
             }}
           >
-            <span className="truncate">雾凇拼音 · 小鹤双拼</span>
-            <span className="shrink-0">1/3 ›</span>
+            <span className="truncate">{schema ? `方案 · ${schema}` : "雾凇拼音 · 小鹤双拼"}</span>
+            <span className="shrink-0">
+              {candidates.length > 1 ? `1/${candidates.length}` : "1/1"} ›
+            </span>
           </div>
         </div>
       </div>

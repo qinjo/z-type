@@ -5,6 +5,7 @@ import { Icon } from "@/components/Icon";
 import { PageHeader } from "@/components/PageHeader";
 import { PlaceholderNote } from "@/components/PlaceholderNote";
 import { TakeoverBanner } from "@/components/TakeoverBanner";
+import { TypingLab } from "@/components/TypingLab";
 import { healthChecks } from "@/lib/demo-data";
 import { ipc } from "@/lib/ipc";
 import { useIpcQuery } from "@/lib/useIpcQuery";
@@ -47,6 +48,10 @@ export function Overview() {
       />
 
       <TakeoverBanner onTakenOver={() => snapshots.reload()} />
+
+      {/* 试打字放在概览：它是默认落地页、也是「先玩一下」的最低门槛入口；
+          诊断页已经承载体检与日志这类只读判断，试打字不是诊断动作。 */}
+      <TypingLab />
 
       <div className="grid grid-cols-3 gap-4">
         <Card title="当前方案" description="来自 scan_profile()" actions={<Badge tone="accent">默认</Badge>}>

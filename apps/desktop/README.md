@@ -2,7 +2,7 @@
 
 跨平台 Rime 输入法可视化配置工作台的前端外壳。技术栈：**Tauri 2 + React 19 + TypeScript + Vite 6 + Tailwind CSS 3**。
 
-本目录是前端工作区，**前端构建（`pnpm build`）完全不依赖 Rust / Cargo**：`src/lib/ipc.ts` 会检测 Tauri 运行时，缺失时自动降级为 mock 数据。首启接管、外观主题、方案与启用、按键、模糊音、双拼、标点、词典、诊断与日志已接入真实 Tauri 命令（`get_takeover_plan` / `accept_takeover` / `list_theme_presets` / `apply_theme` / `scan_profile` / `get_input_settings` / `apply_input_settings` / `apply_and_deploy` / `get_schema_detail` / `get_fuzzy_settings` / `apply_fuzzy_settings` / `run_diagnostics` / `get_dict_inventory` / `read_deploy_log` / `restore_snapshot` / `reveal_path` / `list_user_files` / `write_raw_file` / `reset_managed_keys` / `clear_deploy_lock` / `parse_deploy_log`），10 个页面均已接线，无占位页。
+本目录是前端工作区，**前端构建（`pnpm build`）完全不依赖 Rust / Cargo**：`src/lib/ipc.ts` 会检测 Tauri 运行时，缺失时自动降级为 mock 数据。首启接管、外观主题、方案与启用、按键、模糊音、双拼、标点、词典、诊断与日志已接入真实 Tauri 命令（`get_takeover_plan` / `accept_takeover` / `list_theme_presets` / `apply_theme` / `scan_profile` / `get_input_settings` / `apply_input_settings` / `apply_and_deploy` / `get_schema_detail` / `get_fuzzy_settings` / `apply_fuzzy_settings` / `run_diagnostics` / `get_dict_inventory` / `read_deploy_log` / `restore_snapshot` / `reveal_path` / `list_user_files` / `write_raw_file` / `reset_managed_keys` / `clear_deploy_lock` / `parse_deploy_log` / `engine_status` / `preview_typing` / `preview_commit` / `deploy_in_process` / `shutdown_engine`），10 个页面均已接线，无占位页。外观页候选窗预览可切到「真实引擎候选」、概览页新增「试打字」面板（输入拼音 → 真实候选 → 上屏），两者在未链接 librime 的 stub 构建下都会优雅降级。
 
 ## 快速开始
 
@@ -87,6 +87,25 @@ pnpm tauri build      # 打包（需要图标/签名等发布配置）
 
 > 本轮只改 `apps/desktop/src/**`（`lib/ipc.ts`、`pages/Advanced.tsx`、`pages/Diagnostics.tsx`）与本 README，未触碰 `src-tauri/`、`crates/`、`docs/` 与根文件。
 
+### 进程内 librime 引擎（真实候选 + 试打字）接线后复验（2026-11-12）
+
+| 命令 | 结果 | 说明 |
+| --- | --- | --- |
+| `pnpm install` | ✅ exit 0 | `Lockfile is up to date` / `Already up to date`，`Done in 677ms`；pnpm 10 忽略 esbuild build script 的警告依旧存在，不影响构建 |
+| `pnpm build`（含 `tsc --noEmit`） | ✅ exit 0 | `62 modules transformed`；产物 `dist/index.html` 0.59 kB、CSS 22.67 kB、JS 391.15 kB（gzip 113.10 kB） |
+| `npx tsc --noEmit` | ✅ exit 0 | strict + `noUnusedLocals/Parameters`，无错误 |
+| mock 流程冒烟（vite `ssrLoadModule` + `node:assert`） | ✅ | `engine_status` 初始 `linked=true` / `version=1.17.0(mock)` / `initialized=false` / 目录为 null；`preview_typing("nihao")` → preedit `nihao` + 候选 `你好` / `拟好` + `schema=rime_ice` + `accepted_keys=5`，之后 `initialized=true`；`preview_typing("ni")` → `你` / `尼`（comment 空串）；`preview_commit("nihao",0/1)` → `你好` / `拟好`、越界与空候选为 `null`；未收录输入 `zzzz` → preedit 非空 + 候选为空（走「进程内部署」提示分支）；空输入不创建引擎；`deploy_in_process` → `ok=true` + 日志写入 `read_deploy_log`，且引擎被销毁（真实后端行为）；`shutdown_engine` → `initialized=false`、目录清空；`run_diagnostics` / `list_theme_presets` 回归正常 |
+| 渲染冒烟（`react-dom/server`） | ✅ | `CandidatePreview`：真实候选时渲染 `你好` / `拟好` + 真实 preedit `nihao` + 状态栏 `方案 · rime_ice`、背景仍取主题 `back`、候选数与序号跟随真实数组；候选为空时保留真实 preedit 并回退静态示例候选；不传 `preview` 时原 `ni` \| `hao` 静态结构不变；`TypingLab` 渲染出「试打字 / preedit / 上屏 / 销毁引擎 / 三个快捷串」；`Appearance` 骨架正常 |
+
+> 本轮只改 `apps/desktop/src/**`（`lib/ipc.ts`、`components/CandidatePreview.tsx`、`components/TypingLab.tsx`、`pages/Appearance.tsx`、`pages/Overview.tsx`）与本 README，未触碰 `src-tauri/`、`crates/`、`docs/` 与根文件。
+
+#### 两条流程的交互要点
+
+1. **外观页 · 真实候选预览**：页头显示引擎徽标（`引擎 1.17.0` 绿色 / `未链接 librime` 灰色，来自 `engine_status()`）；候选窗卡片右上角「真实候选」开关默认打开，`linked=false` 时禁用且自动退回静态。开启后候选窗里的候选文字、preedit、状态栏方案名都来自 `preview_typing(<输入框>)`，字号/颜色/圆角/横竖排仍取当前正在编辑的草稿值——改颜色立刻生效，同时候选内容是真实的。输入框默认 `nihao`，防抖 300ms。候选为空 → 黄色提示 + 「进程内部署」（`deploy_in_process()`，成功 toast 并自动重试预览，日志复用页面底部的部署日志卡片并标注 `deploy_in_process()`）；`accepted_keys < 输入长度` → 灰色小字「英文模式下按键由系统直出，引擎不参与」。
+2. **概览页 · 试打字**：输入框自动聚焦、防抖 200ms，preedit 显示为高亮输入串，候选按钮带序号 / text / comment；点击任一候选 → `preview_commit(keys, index)` → 右侧「上屏（模拟文本框）」显示 `上屏：xxx`（`aria-live`，换输入串自动清空）；右侧还显示引擎是否已初始化与其 user 目录，以及「销毁引擎」按钮（`shutdown_engine()`，说明「下次预览会自动重建」；刻意不立刻重试预览，否则引擎会马上被重建）；空候选时给「进程内部署」按钮并展示部署日志；`linked=false` 时整块替换为说明卡片（不报错、不留空）。
+
+**为什么试打字放在概览页**：概览是默认落地页（hash 默认 `#/overview`），试打字是「先玩一下」的最低门槛入口，放这里用户不必先学会导航；诊断页已经承载只读的体检、部署日志解析与错误定位，试打字不是诊断动作，塞进去会让「诊断 = 只读判断」这条语义变模糊。
+
 ## 目录结构
 
 ```text
@@ -107,8 +126,9 @@ apps/desktop/
 │   │   ├── PageHeader.tsx  PlaceholderNote.tsx  Switch.tsx
 │   │   ├── NumberInput.tsx   # 夹取范围的整数输入
 │   │   ├── ColorField.tsx    # 颜色槽：color picker + hex + alpha
-│   │   ├── CandidatePreview.tsx  # 候选窗实时预览
-│   │   └── TakeoverBanner.tsx    # 首启接管横幅
+│   │   ├── CandidatePreview.tsx  # 候选窗实时预览（可接真实引擎候选，空则回退静态示例）
+│   │   ├── TakeoverBanner.tsx    # 首启接管横幅
+│   │   └── TypingLab.tsx         # 试打字面板（真实引擎 preedit/候选/上屏）
 │   ├── lib/
 │   │   ├── ipc.ts            # 类型化 invoke 封装 + mock 降级
 │   │   ├── useIpcQuery.ts    # 极简异步查询 hook
@@ -161,12 +181,24 @@ apps/desktop/
 | `reset_managed_keys` | — | `{ removed }`（只删 `.qieyun/state.json`，不动配置） |
 | `clear_deploy_lock` | — | `{ removed }`（只删 `.qieyun/deploy.lock`） |
 | `parse_deploy_log` | — | `{ entries: {level: error\|warning\|info, source: string\|null, message, files: string[], hint: string\|null}[], errors, warnings, unparsed: string[] }` |
+| `engine_status` | — | `{ linked, version, initialized, user_dir: string\|null, shared_dir: string\|null }`（`linked=false` = stub 构建） |
+| `preview_typing` | `{ keys: string }` | `{ preedit, candidates: {text,comment}[], schema: string\|null, accepted_keys, linked }` |
+| `preview_commit` | `{ keys: string, index: number }` | `string \| null`（第 index 个候选的上屏文本；越界为 null） |
+| `deploy_in_process` | — | `{ ok, log }`（未链接 librime 时后端自动退回子进程部署） |
+| `shutdown_engine` | — | `EngineStatus`（销毁后的状态：`initialized=false`、目录清空） |
 
 `get_schema_detail` 的 Rust 签名是 `schema_id: Option<String>`，但命令没有声明 `rename_all = "snake_case"`——Tauri 2 默认按 camelCase 取参数（`schemaId`）。前端 IPC 层在调用时同时携带 `schema_id` 与 `schemaId` 两种拼写，后端将来补上 `rename_all` 也不会坏；`apply_fuzzy_settings` 声明了 `#[tauri::command(rename_all = "snake_case")]`，参数按契约传 snake_case 即可。
 
 `write_raw_file(name, content)` 声明了 `#[tauri::command(rename_all = "snake_case")]`，参数即 `name` / `content`；`list_user_files` / `reset_managed_keys` / `clear_deploy_lock` / `parse_deploy_log` 无参数。
 
 `restore_snapshot(snapshot_id: String)` 同样没有声明 `rename_all = "snake_case"`，前端按同一策略同时携带 `snapshot_id` 与 `snapshotId`。`reveal_path(path)` 是单词参数，无拼写差异。
+
+`preview_typing(keys)` / `preview_commit(keys, index)` 声明了 `rename_all = "snake_case"`，前端按 `{ keys }` / `{ keys, index }` 传参；`engine_status()` / `deploy_in_process()` / `shutdown_engine()` 无参数。`EngineStatus` / `PreviewResult` 的字段本身就是 snake_case，直接按契约读。
+
+**引擎契约里两个必须正确处理的行为**（否则会误报 bug）：
+
+1. `accepted_keys` 可能小于 `keys.length`：`ascii_mode` 开启时 librime 对字母键返回「不消费」，由宿主直接打字。两个页面的 UI 都只做低调提示（灰色小字「英文模式下按键由系统直出，引擎不参与」），不报错。
+2. `preview_typing().candidates` 为空但 `preedit` 非空：常见原因是「尚未部署 / 方案未编译」。外观页与试打字面板都会给出提示 + 「进程内部署」按钮（`deploy_in_process()`），成功后 toast 并重试预览，而不是当成失败。
 
 `InputSettings` 的枚举均为 snake_case：`page_keys ∈ comma_period / bracket / page_up_down / off`，`toggle_ascii ∈ control_shift_space / shift_left / off`；`page_size` 范围 3–10。`schema_list` 顺序即生效顺序，第一项为默认方案。
 
@@ -178,9 +210,9 @@ apps/desktop/
 
 | 页面 | 占位内容的信息结构 |
 | --- | --- |
-| 概览 | 顶部首启接管横幅（`get_takeover_plan` / `accept_takeover`）+ 三张状态卡（当前方案 / 目录与运行时 / 体检状态）+ 最近快照列表 + 快捷操作。 |
+| 概览 | 顶部首启接管横幅（`get_takeover_plan` / `accept_takeover`）+ **试打字面板**（`engine_status` / `preview_typing` / `preview_commit` / `deploy_in_process` / `shutdown_engine`，自动聚焦输入框、preedit 高亮、可点击候选上屏回显、快捷串 `nihao` / `zhongguo` / `women`、销毁引擎）+ 三张状态卡（当前方案 / 目录与运行时 / 体检状态）+ 最近快照列表 + 快捷操作。 |
 | 方案与启用 | 已接线：`scan_profile()` 取全部方案 + `get_input_settings()` 取启用顺序；已启用列表按生效顺序展示（第 1 位即默认方案），支持开关启用/停用、设为默认（移到首位）、候选数量 3–10；保存（`apply_input_settings`）后重新扫描同步状态，保存并部署（`apply_and_deploy` + 可折叠日志）。 |
-| 外观主题 | 预设颜色卡 + 候选窗实时预览 + 字体/布局/11 个颜色槽编辑 + 保存（`apply_theme`）与保存并部署（`apply_and_deploy` + 可折叠日志）。 |
+| 外观主题 | 预设颜色卡 + 候选窗实时预览（顶部 `engine_status()` 引擎徽标；「真实候选」开关默认打开、仅 `linked=true` 时可用——候选文字来自 `preview_typing()`，样式仍取当前编辑中的主题值；可编辑输入串默认 `nihao`、防抖 300ms；候选为空时提示并给「进程内部署」按钮；未链接 librime 时整体退回静态示例候选 + 一句说明）+ 字体/布局/11 个颜色槽编辑 + 保存（`apply_theme`）与保存并部署（`apply_and_deploy` + 可折叠日志）+ 进程内部署日志（`deploy_in_process`，复用同一日志卡片并标注来源）。 |
 | 按键 | 已接线：翻页键与中英切换两组单选（每个选项展示实际写入的 Rime 绑定）+ 生成的 `key_binder/bindings` YAML 预览（说明用户其它绑定保留）+ 保存 / 保存并部署（`apply_input_settings` / `apply_and_deploy`）。 |
 | 模糊音 | 已接线：`get_fuzzy_settings()` 显示当前默认方案、规则总数与 `compiled` 警告；7 组开关（label + 该组规则原文）+ 实时生成的 `speller/algebra` 片段预览；说明「先剥离旧规则再重建、整段替换、反复保存不膨胀」；保存（`apply_fuzzy_settings`）后重新拉取，保存并部署（`apply_and_deploy` + 可折叠日志）。未选任何组时保存 = 恢复原始 algebra。 |
 | 双拼 | 已接线：从 `scan_profile()` 筛 `is_shuangpin` 方案，展示名称/id/启用/是否默认；「启用 / 设为默认 / 停用」每次先 `get_input_settings()` 读最新再 `apply_input_settings()` 写回（默认方案禁止停用），可选应用后自动部署；右侧只读 `get_schema_detail()` 的 algebra 原文与 `source` 来源提示。明确标注 V1 不提供键位图（键位与 algebra 强耦合，画错比不画更危险）。 |
@@ -201,6 +233,9 @@ apps/desktop/
 - 方案与按键页的写回都会经过后端漂移检测：若 `default.custom.yaml` 里托管的键被手动改过，后端返回中文原因并中止写入，页面把原文展示在操作区顶部，不吞错。按键页保存前会重新读取一次最新设置，只替换 `page_keys` / `toggle_ascii`，避免覆写方案页刚保存的 `schema_list` / `page_size`。
 - `src-tauri/` 未执行 `cargo build`，图标为脚本生成的占位 PNG（正式发布需 `pnpm tauri icon` 重新生成并补 `.icns` / `.ico`）。
 - 路由为轻量 hash 路由（`#/overview` 等），未引入 react-router；后续如需要深链接/嵌套路由再替换。
+- 进程内引擎（`engine_status` / `preview_typing` / `preview_commit` / `deploy_in_process` / `shutdown_engine`）已接入：外观页真实候选与概览页试打字都走真实 librime 的临时会话（不污染真实输入法会话）。stub 构建（`linked=false`）下外观页退回静态示例候选 + 一句说明、试打字整块换成说明卡片，不会报错也不留空白。
+- 试打字只支持当前默认方案：窄 ABI 没暴露 `select_schema`，后端在方案不匹配时会明确报错而不是静默用错方案（前端把后端原文展示在提示行）。`page_size` 也是方案级配置，预览不传。
+- mock 的 `preview_typing` 用一张小词表（`ni` / `nihao` / `zhongguo` / `women`），未收录的输入串**故意返回空候选**，用来在浏览器里点通「可能尚未部署 / 方案未编译」这条分支；mock 的 `linked=true`、`version=1.17.0(mock)`，`deploy_in_process` 会像真实后端一样先销毁引擎再写部署日志，`shutdown_engine` 后 `initialized=false`。
 - 全局快捷键（`Control+Option+\``）仅作展示，未注册系统级快捷键。
 - `pnpm install` 时 pnpm 10 默认忽略 esbuild 的 build script（安全默认值）。当前构建正常；如需显式允许，可在 `package.json` 增加 `pnpm.onlyBuiltDependencies: ["esbuild"]` 后重新安装。
 

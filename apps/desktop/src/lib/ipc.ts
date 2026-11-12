@@ -143,6 +143,52 @@ export interface RestoreResult {
   backup_id: string | null;
 }
 
+// ---------------------------------------------------------------------------
+// 进程内 librime 引擎（真实候选预览 / 试打字）
+// ---------------------------------------------------------------------------
+
+/**
+ * `engine_status()`：引擎的链接与惰性创建状态。
+ *
+ * `linked=false` 是 stub 构建（没有链接真实 librime）：此时任何预览命令都会失败，
+ * 预览类 UI 必须退化为静态示例，不能报错或留白。
+ */
+export interface EngineStatus {
+  /** 本次构建是否链接了真实 librime。 */
+  linked: boolean;
+  /** librime 版本，例如 `1.17.0`；stub 构建下可能是 `stub` 之类占位串。 */
+  version: string;
+  /** 引擎是否已被惰性创建（调用过预览后才会 true）。 */
+  initialized: boolean;
+  /** 引擎创建时使用的目录；未创建时为 null。 */
+  user_dir: string | null;
+  shared_dir: string | null;
+}
+
+/** `preview_typing()` 的单个候选：`comment` 是 Rime 注释，常为空串。 */
+export interface PreviewCandidate {
+  text: string;
+  comment: string;
+}
+
+/**
+ * `preview_typing()`：用一个临时会话「试打字」后的结果。
+ *
+ * 两个必须正确对待的契约：
+ * 1. `accepted_keys` 可能小于 `keys.length`——`ascii_mode` 下 librime 对字母键返回
+ *    「不消费」，由宿主直接打字。这不是错误，UI 只做低调提示。
+ * 2. `candidates` 为空但 `preedit` 非空，常见原因是「尚未部署 / 方案未编译」，
+ *    应引导用户点「进程内部署」，而不是当成 bug。
+ */
+export interface PreviewTypingResult {
+  preedit: string;
+  candidates: PreviewCandidate[];
+  schema: string | null;
+  /** 被引擎消费的按键数（其余按键由宿主直出）。 */
+  accepted_keys: number;
+  linked: boolean;
+}
+
 /** 用户目录里的文件类别（Rust `FileKind`，snake_case 序列化）。 */
 export type UserFileKind =
   | "custom"
@@ -325,6 +371,14 @@ export interface IpcContract {
   reset_managed_keys: { args: undefined; result: DangerResult };
   clear_deploy_lock: { args: undefined; result: DangerResult };
   parse_deploy_log: { args: undefined; result: ParsedDeployLog };
+  engine_status: { args: undefined; result: EngineStatus };
+  preview_typing: { args: { keys: string }; result: PreviewTypingResult };
+  /** 第 `index` 个候选的上屏文本；没有可上屏内容时为 null。 */
+  preview_commit: { args: { keys: string; index: number }; result: string | null };
+  /** 进程内部署；未链接 librime 时后端自动退回 `rime_deployer` 子进程。 */
+  deploy_in_process: { args: undefined; result: DeployResult };
+  /** 销毁引擎（下次使用会重建），返回销毁后的状态。 */
+  shutdown_engine: { args: undefined; result: EngineStatus };
 }
 
 export type IpcCommand = keyof IpcContract;
@@ -1008,6 +1062,98 @@ function delay(ms: number): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// 进程内引擎 mock（真实候选 / 试打字）
+// ---------------------------------------------------------------------------
+
+/** mock 里的 librime 版本；`(mock)` 后缀明确标注不是真的引擎。 */
+const MOCK_ENGINE_VERSION = "1.17.0(mock)";
+
+/**
+ * 试打字的 mock 词表：输入串 → 候选。
+ * 未收录的输入串**故意返回空候选**（真实引擎对拼不出的码也是空候选），
+ * 用来在浏览器里验证「可能尚未部署」这条提示分支。
+ */
+const MOCK_PREVIEW_CANDIDATES: Record<string, PreviewCandidate[]> = {
+  ni: [
+    { text: "你", comment: "" },
+    { text: "尼", comment: "" },
+  ],
+  nihao: [
+    { text: "你好", comment: "" },
+    { text: "拟好", comment: "" },
+  ],
+  zhongguo: [
+    { text: "中国", comment: "" },
+    { text: "種過", comment: "繁体 · mock" },
+  ],
+  women: [
+    { text: "我们", comment: "" },
+    { text: "臥門", comment: "繁体 · mock" },
+  ],
+};
+
+/** mock 引擎状态：`initialized` 只在内存里推进，和真机的惰性创建一致。 */
+let mockEngineInitialized = false;
+/** 最近一次预览用到的方案；`shutdown_engine` 后清空。 */
+let mockEngineSchema: string | null = null;
+
+function mockEngineStatus(): EngineStatus {
+  return {
+    linked: true,
+    version: MOCK_ENGINE_VERSION,
+    initialized: mockEngineInitialized,
+    user_dir: mockEngineInitialized ? MOCK_ENV.rime_user_dir : null,
+    shared_dir: mockEngineInitialized ? MOCK_ENV.shared_dir : null,
+  };
+}
+
+/** mock 的 `preview_typing`：空输入不创建引擎，有输入则创建会话并「消费」全部按键。 */
+function mockPreviewTyping(keys: string): PreviewTypingResult {
+  const typed = keys.trim();
+  if (!typed) {
+    return { preedit: "", candidates: [], schema: null, accepted_keys: 0, linked: true };
+  }
+  mockEngineInitialized = true;
+  mockEngineSchema = mockEngineSchema ?? MOCK_PROFILE.default_schema;
+  return {
+    preedit: typed,
+    candidates: (MOCK_PREVIEW_CANDIDATES[typed] ?? []).map((candidate) => ({ ...candidate })),
+    schema: mockEngineSchema,
+    accepted_keys: typed.length,
+    linked: true,
+  };
+}
+
+/** mock 的 `preview_commit`：取对应候选的 text；越界返回 null（与后端 Option 一致）。 */
+function mockPreviewCommit(keys: string, index: number): string | null {
+  const result = mockPreviewTyping(keys);
+  return result.candidates[index]?.text ?? null;
+}
+
+/**
+ * mock 的 `deploy_in_process`：真实后端会先销毁引擎再部署，这里照样复位引擎状态，
+ * 并把日志写进「最近一次部署」，让诊断页的日志/解析跟着变化。
+ */
+function mockDeployInProcess(): DeployResult {
+  mockEngineInitialized = false;
+  mockEngineSchema = null;
+  const log = [
+    `[deploy] 进程内部署成功（libre ${MOCK_ENGINE_VERSION} · 812 ms）`,
+    `  user   = ${MOCK_ENV.rime_user_dir}`,
+    `  shared = ${MOCK_ENV.shared_dir}`,
+  ].join("\n");
+  mockRecordDeploy(log);
+  return { ok: true, log };
+}
+
+/** mock 的 `shutdown_engine`：销毁后 `initialized=false`、目录清空（与后端 status() 一致）。 */
+function mockShutdownEngine(): EngineStatus {
+  mockEngineInitialized = false;
+  mockEngineSchema = null;
+  return mockEngineStatus();
+}
+
+// ---------------------------------------------------------------------------
 // 调用封装
 // ---------------------------------------------------------------------------
 
@@ -1285,6 +1431,34 @@ export const ipc = {
   /** 解析最近一次部署日志（`.qieyun/last-deploy.log`）。 */
   parseDeployLog(): Promise<ParsedDeployLog> {
     return call("parse_deploy_log", undefined, () => mockParseDeployLog());
+  },
+
+  /** 进程内引擎的链接状态与惰性创建状态。 */
+  engineStatus(): Promise<EngineStatus> {
+    return call("engine_status", undefined, () => mockEngineStatus());
+  },
+
+  /**
+   * 试打字：在临时会话里输入 `keys`，拿到 preedit + 真实候选。
+   * stub 构建（`linked=false`）下后端会 reject，调用方必须先用 `engineStatus()` 判断。
+   */
+  previewTyping(keys: string): Promise<PreviewTypingResult> {
+    return call("preview_typing", { keys }, () => mockPreviewTyping(keys));
+  },
+
+  /** 提交第 `index` 个候选，返回上屏文本；索引越界时为 null。 */
+  previewCommit(keys: string, index: number): Promise<string | null> {
+    return call("preview_commit", { keys, index }, () => mockPreviewCommit(keys, index));
+  },
+
+  /** 进程内部署（不经子进程）；未链接 librime 时后端自动退回子进程部署。 */
+  deployInProcess(): Promise<DeployResult> {
+    return call("deploy_in_process", undefined, () => mockDeployInProcess());
+  },
+
+  /** 销毁引擎；下次预览会自动重建。 */
+  shutdownEngine(): Promise<EngineStatus> {
+    return call("shutdown_engine", undefined, () => mockShutdownEngine());
   },
 };
 

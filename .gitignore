@@ -12,3 +12,6 @@ apps/desktop/src-tauri/target
 # 本地依赖产物（librime 源码/预编译包、临时构建）
 .deps/
 apps/desktop/src-tauri/gen/
+
+# Tauri 打包产物
+apps/desktop/src-tauri/target/

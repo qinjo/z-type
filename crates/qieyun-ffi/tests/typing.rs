@@ -141,7 +141,10 @@ fn options_and_schema_are_readable() {
     let mut engine = Engine::new(&dir, &dir).expect("初始化引擎");
     {
         let mut session = engine.session().expect("会话");
-        assert_eq!(session.current_schema(&mut engine).as_deref(), Some("qieyun_ffi_test"));
+        assert_eq!(
+            session.current_schema(&mut engine).as_deref(),
+            Some("qieyun_ffi_test")
+        );
         assert_eq!(session.option(&mut engine, "ascii_mode"), Some(false));
 
         assert!(session.set_option(&mut engine, "ascii_mode", true));
@@ -155,7 +158,11 @@ fn options_and_schema_are_readable() {
             "ascii_mode 下字母键不应被引擎消费（宿主直出），实际消费了 {accepted} 个"
         );
         let ctx = session.context(&mut engine);
-        assert!(ctx.preedit.is_empty(), "英文模式下不应有 preedit：{}", ctx.preedit);
+        assert!(
+            ctx.preedit.is_empty(),
+            "英文模式下不应有 preedit：{}",
+            ctx.preedit
+        );
         assert!(ctx.candidates.is_empty());
 
         // 复位：关掉英文模式后重新输入仍走拼音
