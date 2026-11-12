@@ -181,10 +181,10 @@ pub fn preview(
     let mut session = engine.session()?;
     if let Some(schema) = schema {
         if !schema.is_empty() {
-            session.set_option(engine, "schema", false);
+            session.set_option("schema", false);
             // 切换方案的可靠做法是通过 `select_schema`；窄 ABI 里没暴露，
             // 因此这里只校验当前方案是否匹配，不匹配就明确报错而不是静默用错方案。
-            let current = session.current_schema(engine);
+            let current = session.current_schema();
             if current.as_deref() != Some(schema) {
                 return Err(format!(
                     "预览只支持当前默认方案（当前 {}）。请先把它设为默认，或部署后重试。",
@@ -194,7 +194,7 @@ pub fn preview(
         }
     }
 
-    result.accepted_keys = session.type_keys(engine, keys);
+    result.accepted_keys = session.type_keys(keys);
     if let Some(size) = page_size {
         // page_size 是方案级配置，不是会话选项；这里只做提示性校验。
         if !(3..=10).contains(&size) {
@@ -202,10 +202,10 @@ pub fn preview(
         }
     }
 
-    let ctx = session.context(engine);
+    let ctx = session.context();
     result.preedit = ctx.preedit;
     result.candidates = ctx.candidates.into_iter().map(Into::into).collect();
-    result.schema = session.current_schema(engine);
+    result.schema = session.current_schema();
     Ok(result)
 }
 
@@ -219,13 +219,21 @@ pub fn preview_commit(
     let mut inner = lock();
     let engine = ensure_engine(&mut inner, user, shared)?;
     let mut session = engine.session()?;
-    session.type_keys(engine, keys);
-    Ok(session.select(engine, index))
+    session.type_keys(keys);
+    Ok(session.select(index))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// 引擎是进程级单例，测试默认并行会互相干扰（也会触发 librime 的全局状态竞争）。
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn serial() -> std::sync::MutexGuard<'static, ()> {
+        TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
 
     fn fixture() -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -262,6 +270,7 @@ mod tests {
 
     #[test]
     fn status_is_always_available() {
+        let _guard = serial();
         let s = status();
         assert_eq!(s.linked, qieyun_ffi::linked());
         assert!(!s.version.is_empty());
@@ -269,6 +278,7 @@ mod tests {
 
     #[test]
     fn preview_types_and_rebuilds_engine_on_dir_change() {
+        let _guard = serial();
         if !qieyun_ffi::linked() {
             eprintln!("跳过：未链接 librime");
             return;
@@ -299,6 +309,7 @@ mod tests {
 
     #[test]
     fn preview_commit_returns_text() {
+        let _guard = serial();
         if !qieyun_ffi::linked() {
             eprintln!("跳过：未链接 librime");
             return;
@@ -312,6 +323,7 @@ mod tests {
 
     #[test]
     fn preview_rejects_unknown_schema_instead_of_silently_wrong() {
+        let _guard = serial();
         if !qieyun_ffi::linked() {
             eprintln!("跳过：未链接 librime");
             return;
@@ -325,6 +337,7 @@ mod tests {
 
     #[test]
     fn stub_mode_degrades_with_error_not_panic() {
+        let _guard = serial();
         if qieyun_ffi::linked() {
             eprintln!("跳过：本次已链接 librime");
             return;

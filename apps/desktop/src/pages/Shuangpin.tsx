@@ -7,8 +7,10 @@ import { PageHeader } from "@/components/PageHeader";
 import { Switch } from "@/components/Switch";
 import { cn } from "@/lib/cn";
 import { ipc, type DeployResult, type SchemaInfo } from "@/lib/ipc";
+import { applyInputSettingsWithConflict } from "@/lib/guiWrite";
 import { SCHEMA_SOURCE_INFO } from "@/lib/schema";
 import { errorMessage, toast } from "@/lib/toast";
+import { useConflictPrompt } from "@/lib/useConflictPrompt";
 import { useIpcQuery } from "@/lib/useIpcQuery";
 
 type SchemaAction = "enable" | "default" | "disable";
@@ -83,6 +85,8 @@ export function Shuangpin() {
   // 方案清单与启用状态分别来自 scan_profile() / get_input_settings()。
   const profile = useIpcQuery(() => ipc.scanProfile());
   const settings = useIpcQuery(() => ipc.getInputSettings());
+  /** 写回冲突（未托管键 / 漂移）的统一弹框通道。 */
+  const { resolveConflict, conflictDialog } = useConflictPrompt();
 
   const [selected, setSelected] = useState<string | null>(null);
   const [busy, setBusy] = useState<BusyState | null>(null);
@@ -139,7 +143,13 @@ export function Shuangpin() {
         toast("提交前校验未通过", "danger");
         return;
       }
-      const written = await ipc.applyInputSettings({ ...latest, schema_list: schemaList });
+      // 冲突时由 ConflictDialog 决定「保留我的」还是「用切韵的值覆盖」（adopt 重放）。
+      const outcome = await applyInputSettingsWithConflict(
+        { ...latest, schema_list: schemaList },
+        resolveConflict,
+      );
+      if (outcome.status === "kept") return;
+      const written = outcome.result;
       profile.reload();
       settings.reload();
       if (!autoDeploy) {
@@ -424,6 +434,8 @@ export function Shuangpin() {
           )}
         </Card>
       )}
+
+      {conflictDialog}
     </div>
   );
 }

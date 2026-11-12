@@ -13,7 +13,9 @@ import {
   type PageKeys,
   type WriteResult,
 } from "@/lib/ipc";
+import { applyInputSettingsWithConflict } from "@/lib/guiWrite";
 import { errorMessage, toast } from "@/lib/toast";
+import { useConflictPrompt } from "@/lib/useConflictPrompt";
 import { useIpcQuery } from "@/lib/useIpcQuery";
 
 type Busy = "save" | "deploy" | null;
@@ -154,6 +156,8 @@ function buildBindingsYaml(pageKeys: PageKeys, toggleAscii: AsciiToggleKey): str
 
 export function KeyBindings() {
   const settings = useIpcQuery(() => ipc.getInputSettings());
+  /** 写回冲突（未托管键 / 漂移）的统一弹框通道。 */
+  const { resolveConflict, conflictDialog } = useConflictPrompt();
   const [draft, setDraft] = useState<InputSettings | null>(null);
   const [busy, setBusy] = useState<Busy>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -209,7 +213,10 @@ export function KeyBindings() {
       page_keys: draft.page_keys,
       toggle_ascii: draft.toggle_ascii,
     };
-    const written = await ipc.applyInputSettings(payload);
+    // 冲突时由 ConflictDialog 决定「保留我的」还是「用切韵的值覆盖」（adopt 重放）。
+    const outcome = await applyInputSettingsWithConflict(payload, resolveConflict);
+    if (outcome.status === "kept") return null;
+    const written = outcome.result;
     setWrittenFiles(written.written_files);
     return written;
   }
@@ -443,6 +450,8 @@ export function KeyBindings() {
           )}
         </Card>
       )}
+
+      {conflictDialog}
     </div>
   );
 }

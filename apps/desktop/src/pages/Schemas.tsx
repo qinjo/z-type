@@ -14,7 +14,9 @@ import {
   type SchemaInfo,
   type WriteResult,
 } from "@/lib/ipc";
+import { applyInputSettingsWithConflict } from "@/lib/guiWrite";
 import { errorMessage, toast } from "@/lib/toast";
+import { useConflictPrompt } from "@/lib/useConflictPrompt";
 import { useIpcQuery } from "@/lib/useIpcQuery";
 
 type Busy = "save" | "deploy" | null;
@@ -30,6 +32,8 @@ export function Schemas() {
   // 方案清单（含未启用）来自 scan_profile()，启用顺序来自 get_input_settings()。
   const profile = useIpcQuery(() => ipc.scanProfile());
   const settings = useIpcQuery(() => ipc.getInputSettings());
+  /** 写回冲突（未托管键 / 漂移）的统一弹框通道。 */
+  const { resolveConflict, conflictDialog } = useConflictPrompt();
 
   const [schemaList, setSchemaList] = useState<string[] | null>(null);
   const [pageSize, setPageSize] = useState(7);
@@ -107,7 +111,10 @@ export function Schemas() {
     const payload = buildSettings();
     if (!payload) return null;
     setActionError(null);
-    const written = await ipc.applyInputSettings(payload);
+    // 冲突时由 ConflictDialog 决定「保留我的」还是「用切韵的值覆盖」（adopt 重放）。
+    const outcome = await applyInputSettingsWithConflict(payload, resolveConflict);
+    if (outcome.status === "kept") return null;
+    const written = outcome.result;
     setWrittenFiles(written.written_files);
     return written;
   }
@@ -495,6 +502,8 @@ export function Schemas() {
           )}
         </Card>
       )}
+
+      {conflictDialog}
     </div>
   );
 }

@@ -141,6 +141,8 @@ export interface DeployLog {
 export interface RestoreResult {
   restored_files: number;
   backup_id: string | null;
+  /** 恢复后重新登记哈希的托管键数量（后端 `RestoreResultDto::refreshed_keys`）。 */
+  refreshed_keys: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -340,6 +342,141 @@ export type GuiEdit =
 export interface GuiPatch {
   files: Record<string, GuiEdit[]>;
   note?: string;
+  /**
+   * 用户在冲突对话框里确认「接管这些手写键」后为 true，后端才会覆盖它们。
+   * 缺省（false）时后端**默认拒绝**，绝不静默覆盖用户手写的键。
+   */
+  adopt?: boolean;
+}
+
+/**
+ * 写回冲突（后端 `ConflictDto`，结构化错误里的 `conflict` 字段）。
+ *
+ * - `unmanaged`：文件里有、但从未由切韵接管的键（用户手写）——
+ *   `squirrel.custom.yaml 中的这些键是你手写的、尚未由切韵接管，已中止写入：style/font_point`
+ * - `drift`：键之前由切韵写入、之后被手改——
+ *   `squirrel.custom.yaml 中的这些键被手动修改过，已中止写入：style/font_point`
+ */
+export interface WriteConflict {
+  file: string;
+  keys: string[];
+  kind: "unmanaged" | "drift";
+}
+
+/** 后端 `CommandError.code`：`conflict` 可进冲突对话框，其余按普通失败展示。 */
+export type CommandErrorCode = "conflict" | "invalid" | "io" | "engine" | "other";
+
+/**
+ * 所有写命令（`write_gui_config` / `apply_theme` / `apply_input_settings` /
+ * `apply_fuzzy_settings`）的统一结构化错误：Tauri 的 `Err(CommandError)` 会序列化成对象，
+ * 而不是字符串；旧后端仍可能只抛字符串，因此 `toCommandError()` 返回 null 时要回退文案解析。
+ */
+export interface CommandError {
+  code: CommandErrorCode;
+  message: string;
+  conflict?: WriteConflict;
+}
+
+/** 校验并规范化结构化的 `conflict` 字段；形状不对时返回 null。 */
+function parseConflictPayload(raw: unknown): WriteConflict | null {
+  if (!raw || typeof raw !== "object") return null;
+  const record = raw as Record<string, unknown>;
+  const kind =
+    record.kind === "unmanaged" ? "unmanaged" : record.kind === "drift" ? "drift" : null;
+  if (!kind || typeof record.file !== "string" || !Array.isArray(record.keys)) return null;
+  return {
+    kind,
+    file: record.file,
+    keys: record.keys.filter((key): key is string => typeof key === "string"),
+  };
+}
+
+/**
+ * 把任意 reject 值还原成结构化 `CommandError`。
+ *
+ * 兼容几种形态：Tauri 直接抛的对象（`{ code, message, conflict? }`）、
+ * IPC 层包装的 `IpcError`（原始 payload 在 `cause` 里）、mock 抛的 `CommandError` 类
+ * （payload 挂在 `payload` 字段上），以及被 JSON 序列化成字符串的同一结构。
+ */
+export function toCommandError(error: unknown): CommandError | null {
+  return readCommandErrorPayload(error);
+}
+
+function readCommandErrorPayload(value: unknown, depth = 0): CommandError | null {
+  if (depth > 4 || value === null || value === undefined) return null;
+
+  if (typeof value === "string") {
+    const text = value.trim();
+    if (!text.startsWith("{")) return null;
+    try {
+      return readCommandErrorPayload(JSON.parse(text), depth + 1);
+    } catch {
+      return null;
+    }
+  }
+
+  if (value instanceof IpcError) return readCommandErrorPayload(value.cause, depth + 1);
+
+  if (value instanceof Error) {
+    const payload = (value as Error & { payload?: unknown }).payload;
+    if (payload !== undefined) return readCommandErrorPayload(payload, depth + 1);
+    const cause = (value as Error & { cause?: unknown }).cause;
+    if (cause !== undefined) return readCommandErrorPayload(cause, depth + 1);
+    return null;
+  }
+
+  if (typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    if (typeof record.code === "string" && typeof record.message === "string") {
+      const conflict = parseConflictPayload(record.conflict);
+      return {
+        code: record.code as CommandErrorCode,
+        message: record.message,
+        ...(conflict ? { conflict } : {}),
+      };
+    }
+    if ("payload" in record) return readCommandErrorPayload(record.payload, depth + 1);
+    if ("cause" in record) return readCommandErrorPayload(record.cause, depth + 1);
+  }
+
+  return null;
+}
+
+/**
+ * 从 IPC 抛出的错误里识别「写回被冲突拒绝」。
+ *
+ * 优先读结构化 payload（`code === "conflict"` 且带 `conflict`）；
+ * 读不到时回退到旧后端的文案解析：
+ * 1. 消息里必须出现 `*.custom.yaml` 文件名，否则不是写回冲突；
+ * 2. 含「尚未由切韵接管」→ `unmanaged`；含「被手动修改过」→ `drift`；
+ * 3. 键名取消息里的（中文）冒号之后，按 `、` 切分。
+ */
+export function parseWriteConflict(error: unknown): WriteConflict | null {
+  const structured = toCommandError(error);
+  if (structured?.code === "conflict" && structured.conflict) return structured.conflict;
+
+  const message = describeError(error);
+  const file = message.match(/[^\s，。：:]+\.custom\.yaml/)?.[0] ?? null;
+  if (!file) return null;
+
+  const kind: WriteConflict["kind"] | null = message.includes("尚未由切韵接管")
+    ? "unmanaged"
+    : message.includes("被手动修改过")
+      ? "drift"
+      : null;
+  if (!kind) return null;
+
+  // 冒号之后是「键、键、键」；半角冒号也兼容（后端目前是中文冒号）。
+  const colon = message.search(/[：:]/);
+  const keys =
+    colon >= 0
+      ? message
+          .slice(colon + 1)
+          .split("、")
+          .map((key) => key.trim().replace(/[。.]$/, ""))
+          .filter(Boolean)
+      : [];
+  return { file, keys, kind };
 }
 
 /** 命令名 -> { 参数, 返回值 } 的静态映射，供实现方与调用方共同引用。 */
@@ -354,12 +491,12 @@ export interface IpcContract {
   get_takeover_plan: { args: undefined; result: TakeoverPlan };
   accept_takeover: { args: undefined; result: TakeoverResult };
   list_theme_presets: { args: undefined; result: ThemePreset[] };
-  apply_theme: { args: { theme: ThemePreset }; result: WriteResult };
+  apply_theme: { args: { theme: ThemePreset; adopt?: boolean }; result: WriteResult };
   get_input_settings: { args: undefined; result: InputSettings };
-  apply_input_settings: { args: { settings: InputSettings }; result: WriteResult };
+  apply_input_settings: { args: { settings: InputSettings; adopt?: boolean }; result: WriteResult };
   get_schema_detail: { args: { schema_id?: string }; result: SchemaDetail };
   get_fuzzy_settings: { args: undefined; result: FuzzySettings };
-  apply_fuzzy_settings: { args: { schema_id: string; groups: string[] }; result: WriteResult };
+  apply_fuzzy_settings: { args: { schema_id: string; groups: string[]; adopt?: boolean }; result: WriteResult };
   apply_and_deploy: { args: undefined; result: DeployResult };
   run_diagnostics: { args: undefined; result: DiagnosticsReport };
   get_dict_inventory: { args: undefined; result: DictInventory };
@@ -787,6 +924,92 @@ const MOCK_WRITE_RESULT: WriteResult = {
   written_files: ["~/Library/Rime/default.custom.yaml", "~/Library/Rime/squirrel.custom.yaml"],
 };
 
+// --- 写回冲突 mock ----------------------------------------------------------
+
+/**
+ * mock 的写回冲突触发方式（三种都支持，方便在浏览器 / 冒烟脚本里点通各分支）：
+ *
+ * 1. **哨兵键**（`writeGuiConfig`）：patch 里出现这些键就抛对应冲突，
+ *    带 `adopt: true` 重放后成功：
+ *    - `style/font_point` → unmanaged（用户手写、尚未接管）
+ *    - `style/font_face`  → drift（之前由切韵写入、之后被手改）
+ * 2. **显式开关**：`__setMockWriteConflict("unmanaged" | "drift")` 让**下一次**写回
+ *    无条件冲突（一次性，触发后自动复位）；`applyTheme` / `applyInputSettings` /
+ *    `applyFuzzySettings` / `writeGuiConfig` 都会读它。
+ * 3. **浏览器控制台**：mock 模式下模块加载时会把上面的函数挂到
+ *    `window.__qieyunSetMockConflict`，执行 `__qieyunSetMockConflict("drift")` 后
+ *    回页面点「保存」即可看到冲突对话框。
+ *
+ * `adopt: true` 对 `unmanaged` 与 `drift` 都放行——与后端修复后的
+ * `write_patch_with`（Adopt 下先重登记漂移基线再覆盖）保持一致。
+ */
+const MOCK_CONFLICT_KEYS: Record<string, WriteConflict["kind"]> = {
+  "style/font_point": "unmanaged",
+  "style/font_face": "drift",
+};
+
+let mockForcedConflict: WriteConflict["kind"] | null = null;
+
+/** 仅 mock 模式生效：强制下一次写回冲突；`null` 关闭。 */
+export function __setMockWriteConflict(kind: WriteConflict["kind"] | null): void {
+  mockForcedConflict = kind;
+}
+
+// 浏览器里没有 import 能力，把演示开关挂到 window 上（仅 mock 模式，不影响 Tauri 构建）。
+if (typeof window !== "undefined" && !hasTauriBackend()) {
+  (window as unknown as Record<string, unknown>).__qieyunSetMockConflict =
+    __setMockWriteConflict;
+}
+
+/**
+ * mock 的结构化命令错误：与 Tauri 序列化后的 `Err(CommandError)` 同形。
+ * 页面/接缝通过 `toCommandError()` 读 `payload`，不需要解析字符串。
+ */
+class MockCommandError extends Error {
+  readonly payload: CommandError;
+
+  constructor(code: CommandErrorCode, message: string, conflict?: WriteConflict) {
+    super(message);
+    this.name = "CommandError";
+    this.payload = conflict ? { code, message, conflict } : { code, message };
+  }
+}
+
+/** mock 冲突的中文原文：与后端 `WriteError` 的 Display 输出逐字一致。 */
+function mockConflictMessage(conflict: WriteConflict): string {
+  const keys = conflict.keys.join("、");
+  return conflict.kind === "unmanaged"
+    ? `${conflict.file} 中的这些键是你手写的、尚未由切韵接管，已中止写入：${keys}`
+    : `${conflict.file} 中的这些键被手动修改过，已中止写入：${keys}`;
+}
+
+/** 取走一次强制冲突（一次性），并把文件名 / 键名换成当前命令的目标。 */
+function takeForcedConflict(file: string, keys: string[]): WriteConflict | null {
+  if (!mockForcedConflict) return null;
+  const kind = mockForcedConflict;
+  mockForcedConflict = null;
+  return { file, keys, kind };
+}
+
+/** 冲突且未 adopt 时抛结构化冲突；adopt（或没有冲突）时放行。 */
+function throwIfConflict(conflict: WriteConflict | null, adopt: boolean | undefined): void {
+  if (conflict && !adopt) {
+    throw new MockCommandError("conflict", mockConflictMessage(conflict), conflict);
+  }
+}
+
+/** 判断这次 patch 在 mock 里是否命中冲突（哨兵键优先于强制开关 → 混合时先报强制）。 */
+function mockWriteConflictOf(patch: GuiPatch): WriteConflict | null {
+  for (const [file, edits] of Object.entries(patch.files)) {
+    const hits = edits.filter((edit) => MOCK_CONFLICT_KEYS[edit.key]);
+    if (hits.length > 0) {
+      const kind = MOCK_CONFLICT_KEYS[hits[0]!.key]!;
+      return { file, keys: hits.map((edit) => edit.key), kind };
+    }
+  }
+  return null;
+}
+
 /** mock 的输入设置：与 `MOCK_PROFILE` 里默认启用的三个方案保持一致。 */
 const MOCK_INPUT_SETTINGS: InputSettings = {
   schema_list: ["rime_ice", "double_pinyin_flypy", "luna_pinyin"],
@@ -1162,8 +1385,9 @@ class IpcError extends Error {
     readonly command: IpcCommand,
     readonly cause: unknown,
   ) {
-    // Tauri 的 reject 值通常是后端 `Err(String)` 的中文原文；
-    // 直接透出原文，页面才能把「这些键被手动修改过，已中止写入」之类的信息展示给用户。
+    // Tauri 的 reject 值可能是结构化错误对象（`{ code, message, conflict? }`），
+    // 也可能是旧的 `Err(String)` 中文原文；describeError 统一取人类可读的那一句，
+    // 原始 payload 留在 `cause` 里供 toCommandError() 读取。
     super(describeError(cause));
     this.name = "IpcError";
   }
@@ -1173,6 +1397,9 @@ function describeError(cause: unknown): string {
   if (typeof cause === "string" && cause.trim()) return cause;
   if (cause instanceof Error && cause.message) return cause.message;
   if (cause && typeof cause === "object") {
+    // 结构化 CommandError：直接取 message，别把整个 JSON 糊到用户脸上。
+    const message = (cause as { message?: unknown }).message;
+    if (typeof message === "string" && message.trim()) return message;
     try {
       const text = JSON.stringify(cause);
       if (text && text !== "{}") return text;
@@ -1257,8 +1484,20 @@ export const ipc = {
     });
   },
 
+  /**
+   * 唯一的结构化写入口。默认**拒绝**覆盖用户手写 / 被手改过的键：
+   * 冲突时抛出的 message 就是后端中文原文，页面应先用 `parseWriteConflict` 识别，
+   * 再弹 `ConflictDialog`；用户确认接管后带 `adopt: true` 重放同一个 patch。
+   */
   writeGuiConfig(patch: GuiPatch): Promise<WriteResult> {
-    return call("write_gui_config", { patch }, () => MOCK_WRITE_RESULT);
+    return call("write_gui_config", { patch }, () => {
+      const conflict =
+        takeForcedConflict("squirrel.custom.yaml", ["style/font_point"]) ??
+        mockWriteConflictOf(patch);
+      // adopt 对 unmanaged / drift 都放行（后端修复后行为一致）。
+      throwIfConflict(conflict, patch.adopt);
+      return MOCK_WRITE_RESULT;
+    });
   },
 
   getTakeoverPlan(): Promise<TakeoverPlan> {
@@ -1282,19 +1521,33 @@ export const ipc = {
     return call("list_theme_presets", undefined, () => MOCK_THEME_PRESETS);
   },
 
-  applyTheme(theme: ThemePreset): Promise<WriteResult> {
-    return call("apply_theme", { theme }, () => MOCK_THEME_WRITE_RESULT);
+  applyTheme(theme: ThemePreset, adopt = false): Promise<WriteResult> {
+    return call("apply_theme", adopt ? { theme, adopt: true } : { theme }, () => {
+      throwIfConflict(
+        takeForcedConflict("squirrel.custom.yaml", ["style/font_face", "style/font_point"]),
+        adopt,
+      );
+      return MOCK_THEME_WRITE_RESULT;
+    });
   },
 
   getInputSettings(): Promise<InputSettings> {
     return call("get_input_settings", undefined, () => cloneInputSettings(mockInputSettings));
   },
 
-  applyInputSettings(settings: InputSettings): Promise<WriteResult> {
-    return call("apply_input_settings", { settings }, () => {
-      mockInputSettings = cloneInputSettings(settings);
-      return { written_files: ["~/Library/Rime/default.custom.yaml"] };
-    });
+  applyInputSettings(settings: InputSettings, adopt = false): Promise<WriteResult> {
+    return call(
+      "apply_input_settings",
+      adopt ? { settings, adopt: true } : { settings },
+      () => {
+        throwIfConflict(
+          takeForcedConflict("default.custom.yaml", ["menu/page_size", "schema_list"]),
+          adopt,
+        );
+        mockInputSettings = cloneInputSettings(settings);
+        return { written_files: ["~/Library/Rime/default.custom.yaml"] };
+      },
+    );
   },
 
   getSchemaDetail(schemaId?: string): Promise<SchemaDetail> {
@@ -1312,8 +1565,11 @@ export const ipc = {
     return call("get_fuzzy_settings", undefined, () => mockFuzzySettings());
   },
 
-  applyFuzzySettings(schemaId: string, groups: string[]): Promise<WriteResult> {
-    return call("apply_fuzzy_settings", { schema_id: schemaId, groups }, () => {
+  applyFuzzySettings(schemaId: string, groups: string[], adopt = false): Promise<WriteResult> {
+    const args = adopt
+      ? { schema_id: schemaId, groups, adopt: true }
+      : { schema_id: schemaId, groups };
+    return call("apply_fuzzy_settings", args, () => {
       const unknown = groups.find(
         (id) => !MOCK_FUZZY_GROUPS.some((group) => group.id === id),
       );
@@ -1323,6 +1579,10 @@ export const ipc = {
           `读不到方案 ${schemaId} 的 speller/algebra——请先在输入法里部署一次，或确认方案已安装。`,
         );
       }
+      throwIfConflict(
+        takeForcedConflict(`${schemaId}.custom.yaml`, ["speller/algebra"]),
+        adopt,
+      );
       // 后端会整段重建 algebra；mock 里记下选择，让重新拉取能看到结果。
       mockFuzzyApplied[schemaId] = [...groups];
       return { written_files: [`~/Library/Rime/${schemaId}.custom.yaml`] };
@@ -1354,8 +1614,8 @@ export const ipc = {
   },
 
   restoreSnapshot(snapshotId: string): Promise<RestoreResult> {
-    // Rust 的 `restore_snapshot(snapshot_id: String)` 没有声明 `rename_all = "snake_case"`，
-    // Tauri 2 默认按 camelCase 取键；两种拼写都带上，后端补 rename_all 后也不会坏。
+    // 后端已声明 `#[tauri::command(rename_all = "snake_case")]`，按 `snapshot_id` 传；
+    // 旧的 camelCase 拼写一并带上，兼容没重新编译的旧后端（多出的键会被忽略）。
     const args = { snapshot_id: snapshotId, snapshotId } as {
       snapshot_id: string;
       snapshotId?: string;
@@ -1367,7 +1627,8 @@ export const ipc = {
         { id: backupId, created_at: mockStamp(), note: "恢复前自动备份" },
         ...mockSnapshots,
       ];
-      return { restored_files: 3, backup_id: backupId };
+      // 恢复后后端会重建托管键哈希；mock 给一个稳定的非零值，便于验证 toast 文案。
+      return { restored_files: 3, backup_id: backupId, refreshed_keys: 7 };
     });
   },
 

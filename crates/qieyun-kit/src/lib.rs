@@ -36,4 +36,4 @@ pub use patch::{apply_edits, CreatePolicy, Edit, PatchError};
 pub use platform::Platform;
 pub use profile::{Profile, SchemaEntry};
 pub use theme::{Colors, Font, Layout, Orientation, Rgba, Theme};
-pub use workspace::{RawWrite, Workspace, WriteError, WriteOutcome};
+pub use workspace::{ConflictKind, ConflictPolicy, RawWrite, Workspace, WriteError, WriteOutcome};

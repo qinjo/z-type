@@ -297,3 +297,43 @@ patch:
 ## 13. 未决
 
 - 是否在 v2 接 Sparkle 自动更新、是否支持 Linux（fcitx5-rime 用户可复用同一份配置）。
+
+## 14. 安全加固（2026-11-12 外部审查后的修订）
+
+以下几条已从"约定"变成"代码保证 + 回归测试"：
+
+| 问题 | 修订 |
+|---|---|
+| 未托管键被静默覆盖 | `State::detect_unmanaged` + `ConflictPolicy::Abort`（默认中止）/`Adopt`（用户确认后接管）。文件里有、`state.json` 未登记的键一律不得改写 |
+| 块值含空行时写回损坏 | `find_key` 续行判定改为"跳过空行/注释看缩进"，不再遇空行即停；4 条 golden test 覆盖空行、注释、块尾注释、追加 patch 块 |
+| `Session` 生命周期未绑定引擎 | `Session<'a>` + `PhantomData<&'a mut Engine>`，`drop(engine)` 在会话存活期间编译失败（`compile_fail` doctest 守护） |
+| 读取失败被当成空文件 | 只有 `NotFound` 视为空；权限/编码错误以 `WriteError::Read` 中止 |
+| 多文件写入非事务 | 落盘阶段失败或 `state.json` 保存失败 → 按写前内容回滚已写文件（原先不存在的则删除） |
+| 快照恢复的备份是 best-effort | 备份失败即中止恢复；恢复后重建托管键哈希，避免下一次写入误判漂移 |
+| 子进程部署不落日志 | 统一 `write_deploy_log`，进程内/子进程两条路径都写 `last-deploy.log` |
+| 部署锁可双重通过 | `create_new` 原子创建 + 唯一 token；只有 token 匹配才删除锁；陈旧锁 120s 可抢占 |
+| 符号链接逃逸用户目录 | `within_user_dir` 对**目标本身**也 canonicalize，识别指向外部的链接 |
+| `schema_id` 未校验 | `is_valid_schema_id`：单段文件名、禁止 `/ \\ ..`，非法 id 直接视为不存在 |
+| 快照无限增长 | 创建后 `prune(DEFAULT_KEEP=20)`；快照排除 `*.dict.yaml` / `*.userdb.txt`（GUI 从不修改、体积大） |
+| `CreatePolicy::Create` 语义不全 | 非空但没有 `patch:` 块的文件会在文末追加块，保留原有内容与注释 |
+
+### 冲突策略的最终语义
+
+`ConflictPolicy` 同时管两类冲突，且 `Adopt` 对两者都生效（这是审查后修正的关键点：
+
+| 冲突 | Abort（默认） | Adopt（用户确认覆盖） |
+|---|---|---|
+| 未托管键（文件里有、state 未登记） | 拒绝，文件不动 | 先把旧值登记为基线，再写入 |
+| 漂移（已托管但被手改） | 拒绝，文件不动 | 先把当前值重新登记为基线，再覆盖 |
+
+覆盖后哈希已更新，后续普通写入不会再误判漂移（`adopt_can_override_drift` 测试守护）。
+
+### 错误契约
+
+写命令返回结构化错误，前端据此弹确认框而不是把中文文案当字符串匹配：
+
+```json
+{ "code": "conflict", "message": "...", "conflict": { "kind": "unmanaged|drift", "file": "...", "keys": ["..."] } }
+```
+
+前端同时保留"文案解析"回退路径，以兼容未升级的后端。

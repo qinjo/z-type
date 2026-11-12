@@ -18,6 +18,69 @@ use crate::engine;
 use crate::paths::Ctx;
 
 // ---------------------------------------------------------------------------
+// 结构化错误：前端需要区分"冲突需要确认"和"普通失败"
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize)]
+pub struct ConflictDto {
+    /// "unmanaged" | "drift"
+    kind: String,
+    file: String,
+    keys: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CommandError {
+    /// 机器可读码：`conflict` / `invalid` / `io` / `engine` / `other`
+    code: String,
+    message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    conflict: Option<ConflictDto>,
+}
+
+impl CommandError {
+    fn new(code: &str, message: impl Into<String>) -> Self {
+        CommandError {
+            code: code.to_string(),
+            message: message.into(),
+            conflict: None,
+        }
+    }
+
+    fn other(message: impl Into<String>) -> Self {
+        CommandError::new("other", message)
+    }
+
+    /// 把 `qieyun-kit` 的写入错误翻译成结构化错误（冲突会被单独标记）。
+    fn from_write(err: qieyun_kit::workspace::WriteError) -> Self {
+        match err.conflict() {
+            Some((kind, file, keys)) => CommandError {
+                code: "conflict".to_string(),
+                message: err.to_string(),
+                conflict: Some(ConflictDto {
+                    kind: kind.as_str().to_string(),
+                    file: file.to_string(),
+                    keys: keys.into_iter().map(str::to_string).collect(),
+                }),
+            },
+            None => CommandError::other(err.to_string()),
+        }
+    }
+}
+
+impl From<String> for CommandError {
+    fn from(message: String) -> Self {
+        CommandError::other(message)
+    }
+}
+
+impl From<&str> for CommandError {
+    fn from(message: &str) -> Self {
+        CommandError::other(message)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // DTO（与前端 TypeScript 契约一一对应）
 // ---------------------------------------------------------------------------
 
@@ -172,10 +235,25 @@ pub fn deploy() -> Result<DeployDto, String> {
     ));
     log.push_str(&String::from_utf8_lossy(&output.stdout));
     log.push_str(&String::from_utf8_lossy(&output.stderr));
+
+    // 落盘，让「诊断与日志」页在子进程部署后也能看到真实日志（审查报告 P2）
+    write_deploy_log(&ctx, &log);
+
     Ok(DeployDto {
         ok: output.status.success(),
         log,
     })
+}
+
+/// 统一的部署日志落盘入口（进程内/子进程两条路径都走它）。
+fn write_deploy_log(ctx: &Ctx, log: &str) {
+    let path = Workspace::new(&ctx.user_dir)
+        .meta_dir()
+        .join("last-deploy.log");
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(&path, log);
 }
 
 #[tauri::command]
@@ -194,6 +272,9 @@ pub struct GuiPatch {
     pub files: BTreeMap<String, Vec<EditPayload>>,
     #[serde(default)]
     pub note: Option<String>,
+    /// 用户在冲突对话框里确认"接管这些手写键"后为 true。
+    #[serde(default)]
+    pub adopt: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -216,7 +297,7 @@ impl From<EditPayload> for Edit {
 
 /// 唯一的写入口：委托给 `qieyun-kit::Workspace`（快照 → 漂移 → 写回 → 记账）。
 #[tauri::command]
-pub fn write_gui_config(patch: GuiPatch) -> Result<WriteDto, String> {
+pub fn write_gui_config(patch: GuiPatch) -> Result<WriteDto, CommandError> {
     let ctx = Ctx::resolve();
     let files: BTreeMap<String, Vec<Edit>> = patch
         .files
@@ -230,9 +311,14 @@ pub fn write_gui_config(patch: GuiPatch) -> Result<WriteDto, String> {
         .collect();
 
     let ws = Workspace::new(&ctx.user_dir);
+    let policy = if patch.adopt {
+        qieyun_kit::workspace::ConflictPolicy::Adopt
+    } else {
+        qieyun_kit::workspace::ConflictPolicy::Abort
+    };
     let outcome = ws
-        .write_patch(&files, patch.note.as_deref())
-        .map_err(|e| e.to_string())?;
+        .write_patch_with(&files, patch.note.as_deref(), policy)
+        .map_err(CommandError::from_write)?;
     Ok(WriteDto {
         written_files: outcome.written_files,
     })
@@ -471,13 +557,18 @@ pub fn list_theme_presets() -> Vec<ThemeDto> {
 
 /// 应用主题：编译成目标平台的样式文件并写入（不部署、不重载）。
 #[tauri::command]
-pub fn apply_theme(theme: ThemeDto) -> Result<WriteDto, String> {
+pub fn apply_theme(theme: ThemeDto, adopt: Option<bool>) -> Result<WriteDto, CommandError> {
     let ctx = Ctx::resolve();
     let ws = Workspace::new(&ctx.user_dir);
     let theme = dto_to_theme(&theme)?;
+    let policy = if adopt.unwrap_or(false) {
+        qieyun_kit::workspace::ConflictPolicy::Adopt
+    } else {
+        qieyun_kit::workspace::ConflictPolicy::Abort
+    };
     let outcome = ws
-        .apply_theme(&theme, Platform::current(), Some("应用主题"))
-        .map_err(|e| e.to_string())?;
+        .apply_theme_with(&theme, Platform::current(), Some("应用主题"), policy)
+        .map_err(CommandError::from_write)?;
     Ok(WriteDto {
         written_files: outcome.written_files,
     })
@@ -549,39 +640,86 @@ mod theme_dto_tests {
 
 struct DeployLock {
     path: PathBuf,
+    /// 本进程持有的唯一 token；只有 token 匹配才允许删除锁文件。
+    token: String,
 }
 
 impl DeployLock {
-    /// 陈旧锁（超过 120 秒）视为上一次部署崩溃留下的，直接抢占。
+    /// 陈旧锁（超过 120 秒）视为上一次部署崩溃留下的，可以抢占。
+    ///
+    /// 用 `create_new` 做原子创建，避免"先读再写"的竞态：两个进程同时检查都通过、
+    /// 然后互相覆盖锁（审查报告 P2）。
     fn acquire(ws: &Workspace) -> Result<Self, String> {
         let dir = ws.meta_dir();
         std::fs::create_dir_all(&dir).map_err(|e| format!("创建状态目录失败：{e}"))?;
         let path = dir.join("deploy.lock");
 
-        if let Ok(text) = std::fs::read_to_string(&path) {
-            let stale = text
-                .split_whitespace()
-                .next()
-                .and_then(|ts| ts.parse::<u64>().ok())
-                .map(|ts| qieyun_kit::time::now_unix().saturating_sub(ts) > 120)
-                .unwrap_or(true);
-            if !stale {
-                return Err(format!(
-                    "已有部署在进行中（锁文件：{}）。请等待完成，或删除该文件后重试。",
-                    path.display()
-                ));
+        for attempt in 0..2 {
+            let token = format!(
+                "{}-{}-{}",
+                qieyun_kit::time::now_unix(),
+                std::process::id(),
+                attempt
+            );
+            let body = format!("{token}\n{}\n", qieyun_kit::time::now_unix());
+
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(mut file) => {
+                    use std::io::Write;
+                    file.write_all(body.as_bytes())
+                        .map_err(|e| format!("写入部署锁失败：{e}"))?;
+                    return Ok(DeployLock { path, token });
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if !Self::is_stale(&path) {
+                        return Err(format!(
+                            "已有部署在进行中（锁文件：{}）。请等待完成，或删除该文件后重试。",
+                            path.display()
+                        ));
+                    }
+                    // 陈旧锁：删掉后重试一次
+                    let _ = std::fs::remove_file(&path);
+                }
+                Err(e) => return Err(format!("创建部署锁失败：{e}")),
             }
         }
+        Err("无法获取部署锁（锁文件反复被抢占）".to_string())
+    }
 
-        let body = format!("{} {}", qieyun_kit::time::now_unix(), std::process::id());
-        std::fs::write(&path, body).map_err(|e| format!("写入部署锁失败：{e}"))?;
-        Ok(DeployLock { path })
+    fn is_stale(path: &PathBuf) -> bool {
+        let Ok(text) = std::fs::read_to_string(path) else {
+            // 读不出来（可能是别人刚创建）→ 保守当作"正在部署"
+            return false;
+        };
+        let ts = text
+            .lines()
+            .nth(1)
+            .and_then(|l| l.trim().parse::<u64>().ok())
+            .or_else(|| {
+                text.split_whitespace()
+                    .next()
+                    .and_then(|t| t.parse::<u64>().ok())
+            });
+        match ts {
+            Some(ts) => qieyun_kit::time::now_unix().saturating_sub(ts) > 120,
+            // 格式不认识（例如旧版本写的锁）：按陈旧处理，避免永久卡死
+            None => true,
+        }
     }
 }
 
 impl Drop for DeployLock {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+        // 只删除"自己的"锁：长部署超时后，别的进程可能已经抢占并重建了锁文件。
+        if let Ok(text) = std::fs::read_to_string(&self.path) {
+            if text.lines().next().map(str::trim) == Some(self.token.as_str()) {
+                let _ = std::fs::remove_file(&self.path);
+            }
+        }
     }
 }
 
@@ -630,8 +768,11 @@ pub fn get_input_settings() -> Result<InputSettingsDto, String> {
 
 /// 写入方案顺序/候选数/翻页键/中英切换。只替换 GUI 管的那批绑定，用户自建绑定保留。
 #[tauri::command]
-pub fn apply_input_settings(settings: InputSettings) -> Result<WriteDto, String> {
-    settings.validate().map_err(|e| e.to_string())?;
+pub fn apply_input_settings(
+    settings: InputSettings,
+    adopt: Option<bool>,
+) -> Result<WriteDto, CommandError> {
+    settings.validate().map_err(|e| CommandError::new("invalid", e.to_string()))?;
     let ctx = Ctx::resolve();
     let root = read_default_custom(&ctx)?;
     let edits = settings.edits(&root);
@@ -641,8 +782,16 @@ pub fn apply_input_settings(settings: InputSettings) -> Result<WriteDto, String>
 
     let ws = Workspace::new(&ctx.user_dir);
     let outcome = ws
-        .write_patch(&files, Some("修改方案与按键"))
-        .map_err(|e| e.to_string())?;
+        .write_patch_with(
+            &files,
+            Some("修改方案与按键"),
+            if adopt.unwrap_or(false) {
+                qieyun_kit::workspace::ConflictPolicy::Adopt
+            } else {
+                qieyun_kit::workspace::ConflictPolicy::Abort
+            },
+        )
+        .map_err(CommandError::from_write)?;
     Ok(WriteDto {
         written_files: outcome.written_files,
     })
@@ -787,12 +936,19 @@ pub fn get_fuzzy_settings() -> Result<FuzzySettingsDto, String> {
 
 /// 应用模糊音：从编译产物取原始 algebra → 剥离旧规则 → 按选择重建，写入 `<schema>.custom.yaml`。
 #[tauri::command(rename_all = "snake_case")]
-pub fn apply_fuzzy_settings(schema_id: String, groups: Vec<String>) -> Result<WriteDto, String> {
+pub fn apply_fuzzy_settings(
+    schema_id: String,
+    groups: Vec<String>,
+    adopt: Option<bool>,
+) -> Result<WriteDto, CommandError> {
     use qieyun_kit::fuzzy::{self, FuzzyGroup};
 
     let parsed: Vec<FuzzyGroup> = groups
         .iter()
-        .map(|id| FuzzyGroup::from_id(id).ok_or_else(|| format!("未知的模糊音组：{id}")))
+        .map(|id| {
+            FuzzyGroup::from_id(id)
+                .ok_or_else(|| CommandError::new("invalid", format!("未知的模糊音组：{id}")))
+        })
         .collect::<Result<_, _>>()?;
 
     let ctx = Ctx::resolve();
@@ -800,13 +956,17 @@ pub fn apply_fuzzy_settings(schema_id: String, groups: Vec<String>) -> Result<Wr
     let detail =
         qieyun_kit::detail::read_schema_detail(&ctx.user_dir, shared.as_deref(), &schema_id);
     if detail.algebra.is_empty() {
-        return Err(format!(
-            "读不到方案 {schema_id} 的 speller/algebra——请先在输入法里部署一次，或确认方案已安装。"
+        return Err(CommandError::new(
+            "invalid",
+            format!(
+                "读不到方案 {schema_id} 的 speller/algebra——请先在输入法里部署一次，或确认方案已安装。"
+            ),
         ));
     }
 
     let algebra = fuzzy::build(&detail.algebra, &parsed);
-    let value = serde_yaml::to_value(&algebra).map_err(|e| e.to_string())?;
+    let value = serde_yaml::to_value(&algebra)
+        .map_err(|e| CommandError::other(e.to_string()))?;
 
     let mut files = BTreeMap::new();
     files.insert(
@@ -816,11 +976,61 @@ pub fn apply_fuzzy_settings(schema_id: String, groups: Vec<String>) -> Result<Wr
 
     let ws = Workspace::new(&ctx.user_dir);
     let outcome = ws
-        .write_patch(&files, Some("修改模糊音"))
-        .map_err(|e| e.to_string())?;
+        .write_patch_with(
+            &files,
+            Some("修改模糊音"),
+            if adopt.unwrap_or(false) {
+                qieyun_kit::workspace::ConflictPolicy::Adopt
+            } else {
+                qieyun_kit::workspace::ConflictPolicy::Abort
+            },
+        )
+        .map_err(CommandError::from_write)?;
     Ok(WriteDto {
         written_files: outcome.written_files,
     })
+}
+
+#[cfg(test)]
+mod conflict_dto_tests {
+    use super::*;
+
+    #[test]
+    fn conflict_errors_are_structured() {
+        // 未托管键
+        let w = qieyun_kit::workspace::WriteError::UnmanagedKeys {
+            file: "squirrel.custom.yaml".into(),
+            keys: "style/font_point、style/font_face".into(),
+        };
+        let err = CommandError::from_write(w);
+        assert_eq!(err.code, "conflict");
+        let c = err.conflict.expect("应带结构化冲突");
+        assert_eq!(c.kind, "unmanaged");
+        assert_eq!(c.file, "squirrel.custom.yaml");
+        assert_eq!(c.keys, vec!["style/font_point", "style/font_face"]);
+
+        // 漂移
+        let w = qieyun_kit::workspace::WriteError::Drift {
+            file: "default.custom.yaml".into(),
+            keys: "menu/page_size".into(),
+        };
+        let err = CommandError::from_write(w);
+        assert_eq!(err.conflict.unwrap().kind, "drift");
+
+        // 普通错误不是冲突
+        let err = CommandError::from_write(qieyun_kit::workspace::WriteError::InvalidFile(
+            "x.dict.yaml".into(),
+        ));
+        assert_eq!(err.code, "other");
+        assert!(err.conflict.is_none());
+    }
+
+    #[test]
+    fn command_error_serializes_without_null_conflict() {
+        let json = serde_json::to_string(&CommandError::other("boom")).unwrap();
+        assert!(json.contains("\"code\":\"other\""));
+        assert!(!json.contains("conflict"), "{json}");
+    }
 }
 
 #[cfg(test)]
@@ -886,6 +1096,8 @@ pub fn read_deploy_log() -> Result<DeployLogDto, String> {
 pub struct RestoreResultDto {
     restored_files: usize,
     backup_id: Option<String>,
+    /// 恢复后重新登记哈希的托管键数量。
+    refreshed_keys: usize,
 }
 
 /// 从快照恢复。恢复前会先把"当前状态"再备份一份，避免恢复本身变成不可逆操作。
@@ -901,16 +1113,42 @@ pub fn restore_snapshot(snapshot_id: String) -> Result<RestoreResultDto, String>
         return Err(format!("快照不存在：{snapshot_id}"));
     }
 
+    // 备份失败必须中止：否则"恢复"就成了不可逆操作（审查报告 P2）
     let backup = snapshot::create(&ctx.user_dir, &ws.snapshots_dir(), "恢复前自动备份")
-        .map(|info| info.id)
-        .ok();
+        .map_err(|e| format!("恢复前自动备份失败，已中止：{e}"))?
+        .id;
 
     let restored =
         snapshot::restore(&snap_dir, &ctx.user_dir).map_err(|e| format!("恢复失败：{e}"))?;
 
+    // 恢复后，托管键的值变了：重建哈希，否则下一次结构化写入会被误判为"漂移"。
+    let mut refreshed_keys = 0usize;
+    if let Ok(mut state) = qieyun_kit::State::load(&ws.state_path()) {
+        let now = qieyun_kit::time::format_iso8601_utc(qieyun_kit::time::now_unix());
+        let files: Vec<String> = state.files.keys().cloned().collect();
+        for file in files {
+            let text = std::fs::read_to_string(ctx.user_dir.join(&file)).unwrap_or_default();
+            let keys: Vec<String> = state
+                .owned_keys(&file)
+                .iter()
+                .map(|k| k.to_string())
+                .collect();
+            for key in keys {
+                if qieyun_kit::patch::current_hash(&text, &key).is_some() {
+                    state.record(&file, &key, &text, &now);
+                    refreshed_keys += 1;
+                } else {
+                    state.forget(&file, &key);
+                }
+            }
+        }
+        let _ = state.save(&ws.state_path());
+    }
+
     Ok(RestoreResultDto {
         restored_files: restored,
-        backup_id: backup,
+        backup_id: Some(backup),
+        refreshed_keys,
     })
 }
 
@@ -1079,11 +1317,7 @@ pub fn deploy_in_process() -> Result<DeployDto, String> {
         ),
     };
 
-    let log_path = Workspace::new(&ctx.user_dir)
-        .meta_dir()
-        .join("last-deploy.log");
-    let _ = std::fs::create_dir_all(log_path.parent().unwrap_or(std::path::Path::new(".")));
-    let _ = std::fs::write(&log_path, &log);
+    write_deploy_log(&ctx, &log);
 
     Ok(DeployDto {
         ok: result.is_ok(),

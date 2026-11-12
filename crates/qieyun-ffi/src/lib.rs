@@ -7,6 +7,7 @@
 //! 这样 CI 与纯前端开发者不会被一个 C 依赖卡住。
 
 use std::ffi::{CStr, CString};
+use std::marker::PhantomData;
 use std::os::raw::{c_char, c_int};
 use std::path::Path;
 
@@ -122,7 +123,10 @@ impl Engine {
     }
 
     /// 新建一个输入会话。
-    pub fn session(&mut self) -> Result<Session, String> {
+    ///
+    /// 返回的 [`Session`] 在类型层面独占借用 `self`：会话存活期间引擎既不能移动
+    /// 也不能再被借用，因此不可能出现"会话指向已释放引擎"的情况。
+    pub fn session(&mut self) -> Result<Session<'_>, String> {
         let id = unsafe { qz_session_new(self.raw) };
         if id == 0 {
             return Err("创建会话失败".into());
@@ -130,20 +134,25 @@ impl Engine {
         Ok(Session {
             engine: self as *mut Engine,
             id,
+            _marker: PhantomData,
         })
     }
 
-    fn process_key(&mut self, session: &Session, ch: char) -> bool {
-        unsafe { qz_process_key(self.raw, session.id, ch as c_int) == 1 }
+    fn process_key(&mut self, session: usize, ch: char) -> bool {
+        self.process_keycode(session, ch as c_int)
     }
 
-    fn context(&mut self, session: &Session) -> Context {
+    fn process_keycode(&mut self, session: usize, keycode: c_int) -> bool {
+        unsafe { qz_process_key(self.raw, session, keycode) == 1 }
+    }
+
+    fn context(&mut self, session: usize) -> Context {
         let mut preedit = [0i8; 512];
         let mut candidates = [0i8; 8192];
         let n = unsafe {
             qz_context(
                 self.raw,
-                session.id,
+                session,
                 preedit.as_mut_ptr(),
                 512,
                 candidates.as_mut_ptr(),
@@ -174,17 +183,9 @@ impl Engine {
         }
     }
 
-    fn select(&mut self, session: &Session, index: usize) -> Option<String> {
+    fn select(&mut self, session: usize, index: usize) -> Option<String> {
         let mut commit = [0i8; 512];
-        let ok = unsafe {
-            qz_select(
-                self.raw,
-                session.id,
-                index as c_int,
-                commit.as_mut_ptr(),
-                512,
-            )
-        };
+        let ok = unsafe { qz_select(self.raw, session, index as c_int, commit.as_mut_ptr(), 512) };
         if ok != 1 {
             return None;
         }
@@ -192,6 +193,38 @@ impl Engine {
             .to_string_lossy()
             .into_owned();
         (!text.is_empty()).then_some(text)
+    }
+
+    fn set_option(&mut self, session: usize, option: &str, value: bool) -> bool {
+        let Ok(option) = CString::new(option) else {
+            return false;
+        };
+        unsafe { qz_set_option(self.raw, session, option.as_ptr(), value as c_int) == 1 }
+    }
+
+    fn get_option(&mut self, session: usize, option: &str) -> Option<bool> {
+        let option = CString::new(option).ok()?;
+        match unsafe { qz_get_option(self.raw, session, option.as_ptr()) } {
+            1 => Some(true),
+            0 => Some(false),
+            _ => None,
+        }
+    }
+
+    fn current_schema(&mut self, session: usize) -> Option<String> {
+        let mut buf = [0i8; 256];
+        let ok = unsafe { qz_current_schema(self.raw, session, buf.as_mut_ptr(), 256) };
+        if ok != 1 {
+            return None;
+        }
+        let id = unsafe { CStr::from_ptr(buf.as_ptr()) }
+            .to_string_lossy()
+            .into_owned();
+        (!id.is_empty()).then_some(id)
+    }
+
+    fn destroy_session(&mut self, session: usize) {
+        unsafe { qz_session_destroy(self.raw, session) };
     }
 
     /// 销毁引擎（Drop 时自动 finalize）。
@@ -219,96 +252,128 @@ impl std::fmt::Debug for Engine {
     }
 }
 
-/// 输入会话。`Session` 与创建它的 `Engine` 绑定，销毁由 `Engine::destroy_session` 负责。
-#[derive(Debug)]
-pub struct Session {
+/// 输入会话。
+///
+/// `Session<'a>` 在**类型层面**独占借用创建它的 `Engine`（`PhantomData<&'a mut Engine>`）：
+///
+/// - 会话存活期间引擎被借走，`drop(engine)` 或 `Engine::destroy()` 都无法编译——
+///   原先"安全代码释放引擎后 `Drop` 访问已释放内存"的 use-after-free 从类型上被消除；
+/// - 会话方法不再接收 `engine` 参数，只操作创建自己时保存的那个引擎，
+///   因此"把 A 引擎的会话拿给 B 引擎用"也不可能发生；
+/// - 会话不实现 `Send` / `Sync`（`*mut Engine` 本身就不是），不会跨线程漂移。
+///
+/// 销毁：`Drop` 兜底（忘记调用也不会泄漏），也可以显式 [`Session::destroy`]。
+///
+/// ```compile_fail
+/// # use qieyun_ffi::Engine;
+/// # fn demo(engine: &mut Engine) {
+/// let mut session = engine.session().unwrap();
+/// drop(engine); // 必须编译失败：session 借用了 engine
+/// # }
+/// ```
+pub struct Session<'a> {
+    /// 创建本会话的引擎。生命周期 `'a` 保证它在 `self` 存活期间一直有效且被独占借用。
     engine: *mut Engine,
+    /// librime 的会话 id；销毁后置 0，作为"已销毁"的标记。
     id: usize,
+    _marker: PhantomData<&'a mut Engine>,
 }
 
-impl Session {
-    /// 输入一串按键字符，返回被引擎接受的数量。
-    pub fn type_keys(&mut self, engine: &mut Engine, keys: &str) -> usize {
+impl<'a> Session<'a> {
+    /// 取回创建本会话的引擎。
+    ///
+    /// # Safety（内部不变量）
+    ///
+    /// `Session` 只能由 [`Engine::session`] 构造，构造时通过 `PhantomData<&'a mut Engine>`
+    /// 独占借走引擎；`&mut self` 保证同一时刻只有一个这样的借用，`'a` 保证引擎尚未释放。
+    fn engine_mut(&mut self) -> &mut Engine {
+        // SAFETY: 见上——指针由 `Engine::session` 从存活的 `&mut Engine` 得到，
+        // 且生命周期参数使引擎不可能在会话存活期间被 drop/移动/另借。
+        unsafe { &mut *self.engine }
+    }
+
+    /// 输入一串按键字符，返回被引擎接受（消费）的数量。
+    pub fn type_keys(&mut self, keys: &str) -> usize {
+        let id = self.id;
         let mut accepted = 0;
         for ch in keys.chars() {
-            if engine.process_key(self, ch) {
+            if self.engine_mut().process_key(id, ch) {
                 accepted += 1;
             }
         }
         accepted
     }
 
-    pub fn context(&self, engine: &mut Engine) -> Context {
-        engine.context(self)
+    /// 当前的 preedit 与候选列表。
+    pub fn context(&mut self) -> Context {
+        let id = self.id;
+        self.engine_mut().context(id)
     }
 
-    pub fn select(&self, engine: &mut Engine, index: usize) -> Option<String> {
-        engine.select(self, index)
+    /// 选中第 `index` 个候选，返回上屏文本（没有上屏时返回 `None`）。
+    pub fn select(&mut self, index: usize) -> Option<String> {
+        let id = self.id;
+        self.engine_mut().select(id, index)
     }
 
-    pub fn destroy(mut self, engine: &mut Engine) {
-        engine.destroy_session(&mut self);
+    /// 显式销毁会话（可省略：`Drop` 也会兜底销毁）。
+    pub fn destroy(mut self) {
+        self.destroy_raw();
     }
 
     /// 切换会话选项（`ascii_mode`、`full_shape`、`transcription` 等）。
-    pub fn set_option(&self, engine: &mut Engine, option: &str, value: bool) -> bool {
-        let Ok(option) = CString::new(option) else {
-            return false;
-        };
-        unsafe { qz_set_option(engine.raw, self.id, option.as_ptr(), value as c_int) == 1 }
+    pub fn set_option(&mut self, option: &str, value: bool) -> bool {
+        let id = self.id;
+        self.engine_mut().set_option(id, option, value)
     }
 
     /// 读取会话选项；未知选项返回 `None`。
-    pub fn option(&self, engine: &mut Engine, option: &str) -> Option<bool> {
-        let option = CString::new(option).ok()?;
-        match unsafe { qz_get_option(engine.raw, self.id, option.as_ptr()) } {
-            1 => Some(true),
-            0 => Some(false),
-            _ => None,
-        }
+    pub fn option(&mut self, option: &str) -> Option<bool> {
+        let id = self.id;
+        self.engine_mut().get_option(id, option)
     }
 
     /// 当前生效的方案 id。
-    pub fn current_schema(&self, engine: &mut Engine) -> Option<String> {
-        let mut buf = [0i8; 256];
-        let ok = unsafe { qz_current_schema(engine.raw, self.id, buf.as_mut_ptr(), 256) };
-        if ok != 1 {
-            return None;
-        }
-        let id = unsafe { CStr::from_ptr(buf.as_ptr()) }
-            .to_string_lossy()
-            .into_owned();
-        (!id.is_empty()).then_some(id)
+    pub fn current_schema(&mut self) -> Option<String> {
+        let id = self.id;
+        self.engine_mut().current_schema(id)
     }
 
     /// 把会话里已输入的按键清空（逐个退格更可靠：librime 没有 clear_composition）。
-    pub fn reset(&self, engine: &mut Engine) {
+    pub fn reset(&mut self) {
+        let id = self.id;
+        let engine = self.engine_mut();
         for _ in 0..128 {
             // BackSpace = 0xff08
-            if unsafe { qz_process_key(engine.raw, self.id, 0xff08 as c_int) } != 1 {
+            if !engine.process_keycode(id, 0xff08) {
                 break;
             }
         }
     }
-}
 
-impl Engine {
-    fn destroy_session(&mut self, session: &mut Session) {
-        if session.id != 0 {
-            unsafe { qz_session_destroy(self.raw, session.id) };
-            session.id = 0;
+    /// 销毁底层会话并把 id 归零（幂等）。
+    fn destroy_raw(&mut self) {
+        let id = std::mem::take(&mut self.id);
+        if id != 0 {
+            self.engine_mut().destroy_session(id);
         }
     }
 }
 
-impl Drop for Session {
+impl Drop for Session<'_> {
     fn drop(&mut self) {
-        // 防御：若调用方忘记 destroy，这里会尝试销毁，避免泄漏。
-        if self.id != 0 && !self.engine.is_null() {
-            let engine = unsafe { &mut *self.engine };
-            unsafe { qz_session_destroy(engine.raw, self.id) };
-            self.id = 0;
-        }
+        // 兜底销毁：调用方忘记 destroy 时也不会泄漏。
+        // 类型安全：`'a` 保证此刻引擎一定还活着，且 `&mut Engine` 未被别处同时借用。
+        self.destroy_raw();
+    }
+}
+
+impl std::fmt::Debug for Session<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Session")
+            .field("id", &self.id)
+            .field("destroyed", &(self.id == 0))
+            .finish()
     }
 }
 

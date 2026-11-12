@@ -11,12 +11,49 @@ use crate::{snapshot, time};
 
 pub const META_DIR: &str = ".qieyun";
 
+/// 遇到"未托管键冲突"时的行为。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConflictPolicy {
+    /// 默认：中止并请用户确认。
+    Abort,
+    /// 用户已确认覆盖：未托管键登记为 GUI 所有、漂移键重新登记哈希，然后继续写。
+    Adopt,
+}
+
+/// 冲突种类，供前端分文案。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConflictKind {
+    /// 文件里有、但从未托管的键（用户手写 / 别的工具写的）。
+    Unmanaged,
+    /// 已托管，但之后被用户手改过。
+    Drift,
+}
+
+impl ConflictKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ConflictKind::Unmanaged => "unmanaged",
+            ConflictKind::Drift => "drift",
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum WriteError {
     #[error("拒绝写入非 custom 文件或非法文件名：{0}")]
     InvalidFile(String),
     #[error("{file} 中的这些键被手动修改过，已中止写入：{keys}")]
     Drift { file: String, keys: String },
+    #[error("{file} 中的这些键是你手写的、尚未由切韵接管，已中止写入：{keys}")]
+    UnmanagedKeys { file: String, keys: String },
+    #[error("读取 {file} 失败：{source}")]
+    Read {
+        file: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("写入过程中失败，已回滚：{0}")]
+    RolledBack(String),
     #[error("备份失败，已中止写入：{0}")]
     Backup(String),
     #[error("处理 {file} 失败：{source}")]
@@ -39,9 +76,31 @@ impl WriteError {
     /// 供 UI 判断是否需要进入冲突解决页。
     pub fn drift_keys(&self) -> Option<(&str, Vec<&str>)> {
         match self {
-            WriteError::Drift { file, keys } => {
+            WriteError::Drift { file, keys } | WriteError::UnmanagedKeys { file, keys } => {
                 Some((file, keys.split('、').filter(|s| !s.is_empty()).collect()))
             }
+            _ => None,
+        }
+    }
+
+    /// 是否属于"需要用户确认才能继续写"的冲突。
+    pub fn is_conflict(&self) -> bool {
+        self.conflict().is_some()
+    }
+
+    /// 冲突的结构化信息（种类 + 文件 + 键），供 UI 弹确认框。
+    pub fn conflict(&self) -> Option<(ConflictKind, &str, Vec<&str>)> {
+        match self {
+            WriteError::Drift { file, keys } => Some((
+                ConflictKind::Drift,
+                file,
+                keys.split('、').filter(|s| !s.is_empty()).collect(),
+            )),
+            WriteError::UnmanagedKeys { file, keys } => Some((
+                ConflictKind::Unmanaged,
+                file,
+                keys.split('、').filter(|s| !s.is_empty()).collect(),
+            )),
             _ => None,
         }
     }
@@ -51,6 +110,17 @@ impl WriteError {
 pub struct WriteOutcome {
     pub written_files: Vec<String>,
     pub snapshot_id: Option<String>,
+}
+
+/// 一次写入中单个文件的待提交状态。
+struct PendingFile {
+    name: String,
+    path: PathBuf,
+    /// 写入前文件是否存在（回滚时决定"恢复"还是"删除"）。
+    existed: bool,
+    before: String,
+    after: String,
+    edits: Vec<Edit>,
 }
 
 /// 用户在磁盘上的 Rime 配置目录。
@@ -95,11 +165,24 @@ impl Workspace {
         state.detect_drift(file, &text)
     }
 
-    /// 应用一批写入意图。所有文件先全部通过校验，再统一落盘（避免写一半）。
+    /// 应用一批写入意图（默认遇到未托管键冲突就中止）。
     pub fn write_patch(
         &self,
         files: &BTreeMap<String, Vec<Edit>>,
         note: Option<&str>,
+    ) -> Result<WriteOutcome, WriteError> {
+        self.write_patch_with(files, note, ConflictPolicy::Abort)
+    }
+
+    /// 应用一批写入意图。
+    ///
+    /// 流程：快照 → 逐文件校验（漂移 / 未托管键 / YAML 合法性）→ 全部通过后统一落盘 →
+    /// 记账。落盘阶段任一文件失败会**回滚已写的文件**，保证不会留下半套配置。
+    pub fn write_patch_with(
+        &self,
+        files: &BTreeMap<String, Vec<Edit>>,
+        note: Option<&str>,
+        policy: ConflictPolicy,
     ) -> Result<WriteOutcome, WriteError> {
         if files.is_empty() {
             return Ok(WriteOutcome {
@@ -115,6 +198,8 @@ impl Workspace {
             let label = note.unwrap_or("GUI 修改前自动备份");
             let info = snapshot::create(&self.user_dir, &self.snapshots_dir(), label)
                 .map_err(|e| WriteError::Backup(e.to_string()))?;
+            // 顺手清理过旧快照，避免磁盘无限增长（失败不影响主流程）
+            let _ = snapshot::prune(&self.snapshots_dir(), snapshot::DEFAULT_KEEP);
             snapshot_id = Some(info.id);
         }
 
@@ -122,25 +207,50 @@ impl Workspace {
             State::load(&self.state_path()).map_err(|e| WriteError::State(e.to_string()))?;
         let now = time::format_iso8601_utc(time::now_unix());
 
-        struct Pending {
-            name: String,
-            path: PathBuf,
-            before: String,
-            after: String,
-            edits: Vec<Edit>,
-        }
-        let mut pending = Vec::new();
+        let mut pending: Vec<PendingFile> = Vec::new();
 
         for (name, edits) in files {
             let path = self.custom_file(name)?;
-            let before = std::fs::read_to_string(&path).unwrap_or_default();
+            let (before, existed) = self.read_optional(name, &path)?;
 
+            // 1a) 已托管键被手改 → 漂移
             let drift = state.detect_drift(name, &before);
             if !drift.is_empty() {
-                return Err(WriteError::Drift {
-                    file: name.clone(),
-                    keys: drift.iter().map(|d| d.key()).collect::<Vec<_>>().join("、"),
-                });
+                match policy {
+                    ConflictPolicy::Abort => {
+                        return Err(WriteError::Drift {
+                            file: name.clone(),
+                            keys: drift.iter().map(|d| d.key()).collect::<Vec<_>>().join("、"),
+                        });
+                    }
+                    ConflictPolicy::Adopt => {
+                        // 用户已确认"用切韵的值覆盖"：把当前值重新登记为基线，
+                        // 否则同一次写入会立刻再次被判为漂移（死路）。
+                        for key in drift.iter().map(|d| d.key()) {
+                            state.record(name, key, &before, &now);
+                        }
+                    }
+                }
+            }
+
+            // 1b) 文件里有、但从未托管的键 → 必须先确认，绝不静默覆盖
+            let keys: Vec<&str> = edits.iter().map(|e| e.key()).collect();
+            let unmanaged = state.detect_unmanaged(name, &before, &keys);
+            if !unmanaged.is_empty() {
+                match policy {
+                    ConflictPolicy::Abort => {
+                        return Err(WriteError::UnmanagedKeys {
+                            file: name.clone(),
+                            keys: unmanaged.join("、"),
+                        });
+                    }
+                    ConflictPolicy::Adopt => {
+                        // 用户已确认：把旧值登记为"托管"，随后正常覆盖
+                        for key in &unmanaged {
+                            state.record(name, key, &before, &now);
+                        }
+                    }
+                }
             }
 
             let after = apply_edits(&before, edits, CreatePolicy::Create).map_err(|e| {
@@ -149,35 +259,95 @@ impl Workspace {
                     source: e,
                 }
             })?;
-            pending.push(Pending {
+            pending.push(PendingFile {
                 name: name.clone(),
                 path,
+                existed,
                 before,
                 after,
                 edits: edits.clone(),
             });
         }
 
-        // 2) 落盘 + 记账
-        let mut written = Vec::new();
+        // 2) 落盘 + 记账（失败回滚已写文件）
+        let mut written: Vec<String> = Vec::new();
+        let mut committed: Vec<&PendingFile> = Vec::new();
         for item in &pending {
-            if item.after != item.before {
-                atomic_write(&item.path, &item.after).map_err(|e| WriteError::Io {
-                    file: item.name.clone(),
-                    source: e,
-                })?;
+            if item.after == item.before {
+                continue;
             }
-            state.record_edits(&item.name, &item.after, &item.edits, &now);
+            if let Err(source) = atomic_write(&item.path, &item.after) {
+                let rolled = Self::rollback(&committed);
+                return Err(WriteError::RolledBack(format!(
+                    "写入 {} 失败：{source}；已回滚 {} 个文件{}",
+                    item.name,
+                    rolled.0,
+                    if rolled.1.is_empty() {
+                        String::new()
+                    } else {
+                        format!("（回滚时又有失败：{}）", rolled.1.join("、"))
+                    }
+                )));
+            }
+            committed.push(item);
             written.push(item.name.clone());
         }
-        state
-            .save(&self.state_path())
-            .map_err(|e| WriteError::State(e.to_string()))?;
+
+        for item in &pending {
+            state.record_edits(&item.name, &item.after, &item.edits, &now);
+        }
+        if let Err(e) = state.save(&self.state_path()) {
+            let rolled = Self::rollback(&committed);
+            return Err(WriteError::RolledBack(format!(
+                "保存状态文件失败：{e}；已回滚 {} 个文件{}",
+                rolled.0,
+                if rolled.1.is_empty() {
+                    String::new()
+                } else {
+                    format!("（回滚时又有失败：{}）", rolled.1.join("、"))
+                }
+            )));
+        }
 
         Ok(WriteOutcome {
-            written_files: written,
+            written_files: if written.is_empty() {
+                pending.iter().map(|p| p.name.clone()).collect()
+            } else {
+                written
+            },
             snapshot_id,
         })
+    }
+
+    /// 读文件：只有"不存在"才算空文件；其它错误（权限、非 UTF-8）必须中止，
+    /// 否则会用新内容覆盖掉读不出来的旧内容。
+    fn read_optional(&self, name: &str, path: &Path) -> Result<(String, bool), WriteError> {
+        match std::fs::read_to_string(path) {
+            Ok(text) => Ok((text, true)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok((String::new(), false)),
+            Err(source) => Err(WriteError::Read {
+                file: name.to_string(),
+                source,
+            }),
+        }
+    }
+
+    /// 尽力回滚：把已写文件恢复成写前内容（原先不存在的则删除）。返回(成功数, 失败文件名)。
+    fn rollback(items: &[&PendingFile]) -> (usize, Vec<String>) {
+        let mut ok = 0;
+        let mut failed = Vec::new();
+        for item in items {
+            let result = if item.existed {
+                atomic_write(&item.path, &item.before)
+            } else {
+                std::fs::remove_file(&item.path)
+            };
+            match result {
+                Ok(()) => ok += 1,
+                Err(_) => failed.push(item.name.clone()),
+            }
+        }
+        (ok, failed)
     }
 
     fn ensure_dirs(&self) -> Result<(), WriteError> {
@@ -263,13 +433,14 @@ mod tests {
         let path = w.user_dir.join("squirrel.custom.yaml");
         std::fs::write(&path, "patch:\n  style/font_point: 14\n").unwrap();
 
-        // 第一次写入建立托管记录
-        w.write_patch(
+        // 第一次写入：文件里已有该键但未托管 → 必须先显式接管
+        w.write_patch_with(
             &files(&[(
                 "squirrel.custom.yaml",
                 vec![Edit::set("style/font_point", Value::from(14u64))],
             )]),
             None,
+            ConflictPolicy::Adopt,
         )
         .unwrap();
         // 用户手改
@@ -292,6 +463,149 @@ mod tests {
         );
         // 文件未被改动
         assert!(std::fs::read_to_string(&path).unwrap().contains("20"));
+    }
+
+    #[test]
+    fn aborts_on_unmanaged_keys_unless_adopted() {
+        let w = ws("unmanaged");
+        let path = w.user_dir.join("squirrel.custom.yaml");
+        // 用户手写的键，state 里没有登记
+        std::fs::write(&path, "patch:\n  style/font_point: 13\n").unwrap();
+
+        let edits = files(&[(
+            "squirrel.custom.yaml",
+            vec![Edit::set("style/font_point", Value::from(14u64))],
+        )]);
+
+        // 默认：中止，且文件一个字节都不动
+        let err = w.write_patch(&edits, None).unwrap_err();
+        assert!(matches!(err, WriteError::UnmanagedKeys { .. }), "{err:?}");
+        assert!(err.is_conflict());
+        assert_eq!(
+            err.drift_keys(),
+            Some(("squirrel.custom.yaml", vec!["style/font_point"]))
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "patch:\n  style/font_point: 13\n"
+        );
+
+        // 确认接管后：写入成功，且后续变更走正常漂移检测
+        w.write_patch_with(&edits, None, ConflictPolicy::Adopt)
+            .unwrap();
+        assert!(std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("style/font_point: 14"));
+    }
+
+    #[test]
+    fn adopt_can_override_drift() {
+        // 审查反馈：Adopt 只放行未托管键，漂移键会被二次拒绝 → 覆盖按钮成了死路。
+        let w = ws("adopt-drift");
+        let path = w.user_dir.join("squirrel.custom.yaml");
+        std::fs::write(&path, "patch:\n  style/font_point: 12\n").unwrap();
+
+        let edits = files(&[(
+            "squirrel.custom.yaml",
+            vec![Edit::set("style/font_point", Value::from(14u64))],
+        )]);
+
+        // 首写：未托管 → Abort 拒绝
+        assert!(matches!(
+            w.write_patch(&edits, None).unwrap_err(),
+            WriteError::UnmanagedKeys { .. }
+        ));
+        // 接管
+        w.write_patch_with(&edits, None, ConflictPolicy::Adopt)
+            .unwrap();
+
+        // 用户手改 → 漂移
+        std::fs::write(&path, "patch:\n  style/font_point: 20\n").unwrap();
+        let err = w.write_patch(&edits, None).unwrap_err();
+        assert!(matches!(err, WriteError::Drift { .. }));
+        assert_eq!(err.conflict().map(|c| c.0), Some(ConflictKind::Drift));
+
+        // Abort 时不写；Adopt 时允许覆盖并重新登记
+        assert!(std::fs::read_to_string(&path).unwrap().contains("20"));
+        w.write_patch_with(&edits, None, ConflictPolicy::Adopt)
+            .unwrap();
+        assert!(std::fs::read_to_string(&path).unwrap().contains("14"));
+
+        // 覆盖之后不再漂移：后续普通写入可直接进行（证明哈希已重新登记）
+        w.write_patch(
+            &files(&[(
+                "squirrel.custom.yaml",
+                vec![Edit::set("style/font_point", Value::from(15u64))],
+            )]),
+            None,
+        )
+        .unwrap();
+        assert!(std::fs::read_to_string(&path).unwrap().contains("15"));
+    }
+
+    #[test]
+    fn new_keys_are_not_conflicts() {
+        let w = ws("newkey");
+        let path = w.user_dir.join("squirrel.custom.yaml");
+        std::fs::write(&path, "patch:\n  style/font_point: 13\n").unwrap();
+        // 写一个文件里不存在的键：不是冲突，直接允许
+        let edits = files(&[(
+            "squirrel.custom.yaml",
+            vec![Edit::set("style/color_scheme", "native")],
+        )]);
+        w.write_patch(&edits, None).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("style/color_scheme: native"));
+        assert!(
+            text.contains("style/font_point: 13"),
+            "他人手写的键必须原样保留"
+        );
+    }
+
+    #[test]
+    fn read_errors_are_not_treated_as_empty_file() {
+        let w = ws("readerr");
+        // 同名目标是目录 → read_to_string 会返回 IsADirectory，不能被当成空文件
+        std::fs::create_dir_all(w.user_dir.join("squirrel.custom.yaml")).unwrap();
+        let edits = files(&[(
+            "squirrel.custom.yaml",
+            vec![Edit::set("style/font_point", Value::from(14u64))],
+        )]);
+        let err = w
+            .write_patch_with(&edits, None, ConflictPolicy::Adopt)
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                WriteError::Read { .. } | WriteError::RolledBack(_) | WriteError::Io { .. }
+            ),
+            "读失败必须报错而不是当空文件：{err:?}"
+        );
+    }
+
+    #[test]
+    fn failed_commit_rolls_back_previous_files() {
+        let w = ws("rollback");
+        std::fs::write(w.user_dir.join("a.custom.yaml"), "patch:\n  x: 1\n").unwrap();
+        // b 的目标是一个目录 → rename 必然失败
+        std::fs::create_dir_all(w.user_dir.join("b.custom.yaml")).unwrap();
+
+        let edits = files(&[
+            ("a.custom.yaml", vec![Edit::set("x", Value::from(2u64))]),
+            ("b.custom.yaml", vec![Edit::set("y", Value::from(3u64))]),
+        ]);
+        let err = w
+            .write_patch_with(&edits, None, ConflictPolicy::Adopt)
+            .unwrap_err();
+        assert!(
+            matches!(err, WriteError::RolledBack(_) | WriteError::Read { .. }),
+            "应失败并回滚：{err:?}"
+        );
+        // 关键：a 必须回到原值，不能停在半提交状态
+        assert_eq!(
+            std::fs::read_to_string(w.user_dir.join("a.custom.yaml")).unwrap(),
+            "patch:\n  x: 1\n"
+        );
     }
 
     #[test]
@@ -448,6 +762,17 @@ impl Workspace {
         platform: crate::platform::Platform,
         note: Option<&str>,
     ) -> Result<WriteOutcome, WriteError> {
+        self.apply_theme_with(theme, platform, note, ConflictPolicy::Abort)
+    }
+
+    /// 同上，但可指定冲突策略（用户确认覆盖时传 `Adopt`）。
+    pub fn apply_theme_with(
+        &self,
+        theme: &crate::theme::Theme,
+        platform: crate::platform::Platform,
+        note: Option<&str>,
+        policy: ConflictPolicy,
+    ) -> Result<WriteOutcome, WriteError> {
         let file = match platform {
             crate::platform::Platform::Macos => "squirrel.custom.yaml",
             crate::platform::Platform::Windows => "weasel.custom.yaml",
@@ -455,7 +780,7 @@ impl Workspace {
         let edits = theme.edits(platform);
         let mut files = BTreeMap::new();
         files.insert(file.to_string(), edits);
-        self.write_patch(&files, note)
+        self.write_patch_with(&files, note, policy)
     }
 }
 

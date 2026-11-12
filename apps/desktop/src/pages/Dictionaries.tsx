@@ -67,9 +67,13 @@ export function Dictionaries() {
     try {
       const result = await ipc.restoreSnapshot(snapshotId);
       const backup = result.backup_id
-        ? ` · 已先自动备份（${result.backup_id}）`
+        ? `，恢复前已自动备份 ${result.backup_id}`
         : "";
-      toast(`已恢复 ${result.restored_files} 个文件${backup}`, "ok");
+      // 恢复后后端会把托管键的值重新登记（否则下一次结构化写入会被误判为漂移）。
+      toast(
+        `已恢复 ${result.restored_files} 个文件（托管键已重新登记 ${result.refreshed_keys} 个）${backup}`,
+        "ok",
+      );
       setConfirmingId(null);
       snapshots.reload();
       inventory.reload();

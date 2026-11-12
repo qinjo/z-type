@@ -6,8 +6,10 @@ import { Icon } from "@/components/Icon";
 import { PageHeader } from "@/components/PageHeader";
 import { Switch } from "@/components/Switch";
 import { cn } from "@/lib/cn";
+import { applyFuzzySettingsWithConflict } from "@/lib/guiWrite";
 import { ipc, type DeployResult, type WriteResult } from "@/lib/ipc";
 import { errorMessage, toast } from "@/lib/toast";
+import { useConflictPrompt } from "@/lib/useConflictPrompt";
 import { useIpcQuery } from "@/lib/useIpcQuery";
 
 type Busy = "save" | "deploy" | null;
@@ -18,6 +20,8 @@ function sameIds(a: readonly string[], b: readonly string[]): boolean {
 
 export function FuzzyPinyin() {
   const settings = useIpcQuery(() => ipc.getFuzzySettings());
+  /** 写回冲突（未托管键 / 漂移）的统一弹框通道。 */
+  const { resolveConflict, conflictDialog } = useConflictPrompt();
 
   // 勾选状态与后端返回的 enabled 对齐；保存后再重拉，用后端值覆盖草稿。
   const [selected, setSelected] = useState<string[] | null>(null);
@@ -102,7 +106,14 @@ export function FuzzyPinyin() {
     if (!data || selected === null) return null;
     setActionError(null);
     const ids = orderedSelected.map((group) => group.id);
-    const written = await ipc.applyFuzzySettings(data.schema_id, ids);
+    // 冲突时由 ConflictDialog 决定「保留我的」还是「用切韵的值覆盖」（adopt 重放）。
+    const outcome = await applyFuzzySettingsWithConflict(
+      data.schema_id,
+      ids,
+      resolveConflict,
+    );
+    if (outcome.status === "kept") return null;
+    const written = outcome.result;
     setSavedGroups(ids);
     setWrittenFiles(written.written_files);
     return written;
@@ -446,6 +457,8 @@ export function FuzzyPinyin() {
           )}
         </Card>
       )}
+
+      {conflictDialog}
     </div>
   );
 }

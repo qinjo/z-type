@@ -16,6 +16,9 @@ pub const CONFIG_EXTENSIONS: &[&str] = &["yaml", "yml", "txt", "json"];
 pub const EXCLUDED_DIRS: &[&str] = &["build", "plum", "sync", "userdb", ".git", "node_modules"];
 /// 默认保留的快照份数。
 pub const DEFAULT_KEEP: usize = 20;
+/// 不进入快照的文件后缀：这些是词典源文件，GUI 从不修改，且往往很大。
+/// 每次保存都整包复制会让磁盘占用失控（审查报告 P2）。
+pub const EXCLUDED_SUFFIXES: &[&str] = &[".dict.yaml", ".userdb.txt"];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SnapshotInfo {
@@ -35,6 +38,16 @@ struct Meta {
 
 pub fn is_config_file(path: &Path) -> bool {
     if path.file_name().is_some_and(|n| n == "meta.json") {
+        return false;
+    }
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    if EXCLUDED_SUFFIXES
+        .iter()
+        .any(|suffix| name.ends_with(suffix))
+    {
         return false;
     }
     path.is_file()
@@ -222,6 +235,23 @@ mod tests {
         assert_eq!(list(&store).unwrap().len(), 2);
         assert_eq!(prune(&store, 1).unwrap(), 1);
         assert_eq!(list(&store).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn dict_sources_are_excluded_to_keep_snapshots_small() {
+        let root = tmpdir("dict");
+        let rime = root.join("rime");
+        fs::create_dir_all(&rime).unwrap();
+        fs::write(rime.join("rime_ice.dict.yaml"), "big").unwrap();
+        fs::write(rime.join("rime_ice.userdb.txt"), "big").unwrap();
+        fs::write(rime.join("default.custom.yaml"), "patch: {}\n").unwrap();
+        let files = collect_config_files(&rime).unwrap();
+        assert_eq!(
+            files.len(),
+            1,
+            "只应快照 default.custom.yaml，实际 {files:?}"
+        );
+        assert!(files[0].ends_with("default.custom.yaml"));
     }
 
     #[test]

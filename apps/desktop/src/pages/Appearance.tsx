@@ -27,7 +27,9 @@ import {
   isDarkTheme,
   validateTheme,
 } from "@/lib/theme";
+import { applyThemeWithConflict } from "@/lib/guiWrite";
 import { errorMessage, toast } from "@/lib/toast";
+import { useConflictPrompt } from "@/lib/useConflictPrompt";
 import { useIpcQuery } from "@/lib/useIpcQuery";
 
 const SLOT_LABELS: Record<ThemeColorSlot, string> = {
@@ -74,6 +76,8 @@ export function Appearance() {
   const presets = useIpcQuery(() => ipc.listThemePresets());
   /** 进程内引擎状态：`linked=false`（stub 构建）时真实候选不可用。 */
   const engine = useIpcQuery(() => ipc.engineStatus());
+  /** 写回冲突（未托管键 / 漂移）的统一弹框通道。 */
+  const { resolveConflict, conflictDialog } = useConflictPrompt();
   const [draft, setDraft] = useState<ThemePreset | null>(null);
   const [busy, setBusy] = useState<Busy>(null);
   const [invalidSlots, setInvalidSlots] = useState<ThemeColorSlot[]>([]);
@@ -192,7 +196,10 @@ export function Appearance() {
     setInvalidSlots([]);
     setActionError(null);
     setDraft(theme);
-    const written = await ipc.applyTheme(theme);
+    // 冲突时由 ConflictDialog 决定「保留我的」还是「用切韵的值覆盖」（adopt 重放）。
+    const outcome = await applyThemeWithConflict(theme, resolveConflict);
+    if (outcome.status === "kept") return null;
+    const written = outcome.result;
     setWrittenFiles(written.written_files);
     return { theme, written };
   }
@@ -701,6 +708,8 @@ export function Appearance() {
           )}
         </Card>
       )}
+
+      {conflictDialog}
     </div>
   );
 }

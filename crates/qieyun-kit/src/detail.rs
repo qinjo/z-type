@@ -47,6 +47,20 @@ pub struct SchemaDetail {
     pub is_shuangpin: bool,
 }
 
+/// schema id 是否安全：必须是单段文件名，不能含路径分隔符或 `..`。
+///
+/// 审查报告 P2：`get_schema_detail(schema_id)` 的入参来自前端，未校验时 `../` 可逃出目录。
+pub fn is_valid_schema_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && !id.contains('/')
+        && !id.contains('\\')
+        && !id.contains("..")
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+}
+
 /// 解析出位置：build → user → shared。
 pub fn resolve_schema_file(
     user_dir: &Path,
@@ -71,6 +85,18 @@ pub fn resolve_schema_file(
 }
 
 pub fn read_schema_detail(user_dir: &Path, shared_dir: Option<&Path>, id: &str) -> SchemaDetail {
+    if !is_valid_schema_id(id) {
+        // 非法 id 直接当作"不存在"，绝不拼路径
+        return SchemaDetail {
+            id: id.to_string(),
+            name: id.to_string(),
+            source: DetailSource::Missing,
+            algebra: Vec::new(),
+            punctuator: serde_json::Value::Null,
+            switches: Vec::new(),
+            is_shuangpin: false,
+        };
+    }
     let (path, source) = resolve_schema_file(user_dir, shared_dir, id);
     let root: Option<Value> = path
         .as_ref()
@@ -208,6 +234,21 @@ mod tests {
         assert_eq!(d.source, DetailSource::Missing);
         assert!(d.algebra.is_empty());
         assert!(d.switches.is_empty());
+    }
+
+    #[test]
+    fn rejects_path_traversal_schema_ids() {
+        for bad in ["../evil", "a/b", "..", "", "a\\b"] {
+            assert!(!is_valid_schema_id(bad), "{bad} 应被判非法");
+        }
+        for good in ["rime_ice", "double_pinyin_flypy", "luna-pinyin"] {
+            assert!(is_valid_schema_id(good), "{good} 应合法");
+        }
+
+        let (user, shared) = fixture();
+        let detail = read_schema_detail(&user, Some(&shared), "../../../etc/passwd");
+        assert_eq!(detail.source, DetailSource::Missing);
+        assert!(detail.algebra.is_empty());
     }
 
     #[test]

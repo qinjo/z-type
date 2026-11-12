@@ -107,7 +107,8 @@ pub fn apply_edits(text: &str, edits: &[Edit], policy: CreatePolicy) -> Result<S
         })
         .collect();
 
-    if lines.iter().all(|l| l.trim().is_empty()) {
+    let is_empty = lines.iter().all(|l| l.trim().is_empty());
+    if is_empty {
         match policy {
             CreatePolicy::Create => {
                 lines = vec![
@@ -120,6 +121,16 @@ pub fn apply_edits(text: &str, edits: &[Edit], policy: CreatePolicy) -> Result<S
             }
             CreatePolicy::Reject => return Err(PatchError::MissingPatchBlock),
         }
+    } else if policy == CreatePolicy::Create && locate_block(&lines, policy).is_err() {
+        // 非空文件里没有 patch 块：在文末追加（保留原有内容与注释）
+        while lines.last().is_some_and(|l| l.trim().is_empty()) {
+            lines.pop();
+        }
+        lines.push(String::new());
+        lines
+            .push("# Added by 切韵：以下 patch 块由可视化配置维护，其余内容保持原样。".to_string());
+        lines.push("patch:".to_string());
+        lines.push(String::new());
     }
 
     for edit in edits {
@@ -183,6 +194,7 @@ fn locate_block(
     let Some(patch_idx) = patch_idx else {
         return match policy {
             CreatePolicy::Reject => Err(PatchError::MissingPatchBlock),
+            // Create：文件存在但没有 patch 块 → 由调用方在后面追加（见 apply_edits）
             CreatePolicy::Create => Err(PatchError::MissingPatchBlock),
         };
     };
@@ -222,18 +234,27 @@ fn find_key(
         if !is_blank(line) && !is_comment(line) && indent_of(line) == Some(indent) {
             if let Some(k) = key_token(line) {
                 if k == key {
+                    // 续行判定：只要下一行（跳过空行/注释）缩进更深，就仍属于这个键。
+                    // 不能"遇空行即停"——块值中间允许空行，否则重写时会把后半段
+                    // 留在原地，粘到新值后面，产出损坏的配置。
                     let mut j = i + 1;
+                    let mut last_content_end = i + 1;
                     while j < end {
                         let l = &lines[j];
-                        if is_blank(l) {
-                            break;
+                        if is_blank(l) || is_comment(l) {
+                            j += 1;
+                            continue;
                         }
                         match indent_of(l) {
-                            Some(ind) if ind > indent => j += 1,
+                            Some(ind) if ind > indent => {
+                                j += 1;
+                                last_content_end = j;
+                            }
                             _ => break,
                         }
                     }
-                    return Some((i, j));
+                    // 尾部空行/注释保留（可能属于下一个键）
+                    return Some((i, last_content_end));
                 }
             }
         }
@@ -481,6 +502,115 @@ menu/page_size: 7
         assert!(!out.contains("- schema: rime_ice"));
         assert!(out.contains("  # 方案列表")); // 注释属于用户，保留
         assert!(out.contains("style/font_point: 13"));
+    }
+
+    #[test]
+    fn block_value_with_inner_blank_line_is_fully_replaced() {
+        // 审查报告 P1：块值中间有空行时，旧实现遇空行就停，后半段会粘到新值上。
+        let text = "\
+patch:
+  preset_color_schemes/x:
+    name: A
+
+    back_color: 0x112233
+  menu/page_size: 7
+";
+        let out = apply_edits(
+            text,
+            &[Edit::set_raw("preset_color_schemes/x", "name: B")],
+            CreatePolicy::Reject,
+        )
+        .unwrap();
+
+        let root: Value = serde_yaml::from_str(&out).unwrap();
+        let scheme = root
+            .get("patch")
+            .unwrap()
+            .get("preset_color_schemes/x")
+            .unwrap();
+        assert_eq!(scheme.get("name").and_then(|v| v.as_str()), Some("B"));
+        assert!(
+            scheme.get("back_color").is_none(),
+            "旧块内容必须被整体替换，实际：{out}"
+        );
+        assert_eq!(
+            root.get("patch")
+                .unwrap()
+                .get("menu/page_size")
+                .and_then(|v| v.as_u64()),
+            Some(7)
+        );
+    }
+
+    #[test]
+    fn block_value_with_inner_comment_is_fully_replaced() {
+        let text = "\
+patch:
+  preset_color_schemes/x:
+    name: A
+    # 这里是我自己的备注
+    back_color: 0x112233
+  menu/page_size: 7
+";
+        let out = apply_edits(
+            text,
+            &[Edit::set_raw("preset_color_schemes/x", "name: B")],
+            CreatePolicy::Reject,
+        )
+        .unwrap();
+        let root: Value = serde_yaml::from_str(&out).unwrap();
+        let scheme = root
+            .get("patch")
+            .unwrap()
+            .get("preset_color_schemes/x")
+            .unwrap();
+        assert!(scheme.get("back_color").is_none(), "{out}");
+        assert_eq!(
+            root.get("patch")
+                .unwrap()
+                .get("menu/page_size")
+                .and_then(|v| v.as_u64()),
+            Some(7)
+        );
+    }
+
+    #[test]
+    fn trailing_comment_before_next_key_is_preserved() {
+        // 块尾的空行/注释可能属于下一个键，不能被吞掉
+        let text = "patch:\n  a: 1\n\n  # 下一个键的说明\n  b: 2\n";
+        let out = apply_edits(text, &[Edit::set("a", 9)], CreatePolicy::Reject).unwrap();
+        assert!(out.contains("# 下一个键的说明"), "{out}");
+        assert!(out.contains("b: 2"));
+    }
+
+    #[test]
+    fn create_policy_appends_patch_block_to_non_empty_file() {
+        // 审查报告低优先级：Create 原先无法给"非空但没有 patch 块"的文件追加
+        let text = "schema_list:\n  - schema: rime_ice\n# 用户注释\n";
+        let out = apply_edits(
+            text,
+            &[Edit::set("menu/page_size", 9)],
+            CreatePolicy::Create,
+        )
+        .unwrap();
+        assert!(out.contains("# 用户注释"), "原有注释必须保留：{out}");
+        assert!(out.contains("schema_list:"), "原有内容必须保留：{out}");
+        let root: Value = serde_yaml::from_str(&out).unwrap();
+        assert_eq!(
+            root.get("patch")
+                .unwrap()
+                .get("menu/page_size")
+                .and_then(|v| v.as_u64()),
+            Some(9)
+        );
+        // 幂等
+        let again = apply_edits(
+            &out,
+            &[Edit::set("menu/page_size", 9)],
+            CreatePolicy::Create,
+        )
+        .unwrap();
+        assert_eq!(out, again);
     }
 
     #[test]

@@ -148,6 +148,23 @@ impl State {
         }
     }
 
+    /// 找出"文件里已经存在、但 state 未登记"的键。
+    ///
+    /// 这些键属于用户（可能是手写、也可能是别的工具写的）。架构约定 GUI 绝不静默改写它们，
+    /// 必须显式接管（用户确认）后才能写。
+    pub fn detect_unmanaged<'a>(&self, file: &str, text: &str, keys: &[&'a str]) -> Vec<&'a str> {
+        keys.iter()
+            .copied()
+            .filter(|key| {
+                if self.key_record(file, key).is_some() {
+                    return false;
+                }
+                // 只有"文件里真的有这个键"才算冲突；不存在的键是 GUI 新增，允许。
+                patch::current_hash(text, key).is_some()
+            })
+            .collect()
+    }
+
     /// 写入前调用：找出被用户手改过的托管键。
     pub fn detect_drift(&self, file: &str, text: &str) -> Vec<Drift> {
         let Some(ownership) = self.files.get(file) else {
@@ -196,6 +213,21 @@ mod tests {
         let user_deleted = "patch:\n  style/font_face: X\n";
         let drift = state.detect_drift(FILE, user_deleted);
         assert!(matches!(&drift[0], Drift::Missing { key } if key == "style/font_point"));
+    }
+
+    #[test]
+    fn detects_keys_present_in_file_but_not_owned() {
+        let state = State::default();
+        let text = "patch:\n  style/font_point: 13\n  style/font_face: X\n";
+        let keys = ["style/font_point", "style/color_scheme"];
+        let unmanaged = state.detect_unmanaged(FILE, text, &keys);
+        // font_point 在文件里存在但未登记 → 冲突；color_scheme 不存在 → 可新增
+        assert_eq!(unmanaged, vec!["style/font_point"]);
+
+        // 登记后就不再冲突
+        let mut state = State::default();
+        state.record(FILE, "style/font_point", text, "t");
+        assert!(state.detect_unmanaged(FILE, text, &keys).is_empty());
     }
 
     #[test]
