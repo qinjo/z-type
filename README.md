@@ -11,9 +11,9 @@
 
 ## 现在是什么状态
 
-**M1/M2 阶段**：架构与决策定稿；`crates/qieyun-kit` 覆盖写回/托管键/漂移检测/主题编译/快照/接管；
-Tauri 后端打通环境探测、方案扫描、部署（rime_deployer）、主题应用、首启接管；
-GUI 的概览与外观页已接真实数据，其余页面仍是占位。平台外壳（Squirrel/Weasel fork）尚未接入。
+**M5 阶段**：架构与决策定稿；`crates/qieyun-kit` 覆盖写回/托管键/漂移检测/主题编译/快照/接管/
+方案与按键/模糊音/词典盘点/配置体检；Tauri 后端打通 20+ 命令；GUI 除「高级」外的页面均已接真实数据。
+平台外壳（Squirrel/Weasel fork）尚未接入；词典的删词/词频需要 librime FFI（V2）。
 契约测试可在真实 librime 上验证"GUI 写出的 patch 确实生效"。见 [roadmap](docs/roadmap.md)。
 
 ## 仓库结构

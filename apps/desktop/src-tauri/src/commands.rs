@@ -48,6 +48,7 @@ pub struct SnapshotDto {
     id: String,
     created_at: String,
     note: String,
+    file_count: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -122,6 +123,7 @@ pub fn list_snapshots() -> Result<Vec<SnapshotDto>, String> {
             id: s.id,
             created_at: s.created_at,
             note: s.note,
+            file_count: s.file_count,
         })
         .collect())
 }
@@ -829,4 +831,113 @@ mod fuzzy_dto_tests {
             assert!(!g.rules().is_empty());
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// 诊断 / 词典 / 快照恢复（M5）
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub fn run_diagnostics() -> Result<qieyun_kit::diagnostics::DiagnosticsReport, String> {
+    let ctx = Ctx::resolve();
+    let shared = env::detect_shared_dir(&env::shared_dir_candidates());
+    Ok(qieyun_kit::diagnostics::run(
+        &ctx.user_dir,
+        shared.as_deref(),
+    ))
+}
+
+#[tauri::command]
+pub fn get_dict_inventory() -> Result<qieyun_kit::dicts::DictInventory, String> {
+    let ctx = Ctx::resolve();
+    let shared = env::detect_shared_dir(&env::shared_dir_candidates());
+    Ok(qieyun_kit::dicts::inventory(
+        &ctx.user_dir,
+        shared.as_deref(),
+    ))
+}
+
+#[derive(Debug, Serialize)]
+pub struct DeployLogDto {
+    exists: bool,
+    content: String,
+}
+
+#[tauri::command]
+pub fn read_deploy_log() -> Result<DeployLogDto, String> {
+    let ctx = Ctx::resolve();
+    let path = Workspace::new(&ctx.user_dir)
+        .meta_dir()
+        .join("last-deploy.log");
+    match std::fs::read_to_string(&path) {
+        Ok(content) => Ok(DeployLogDto {
+            exists: true,
+            content,
+        }),
+        Err(_) => Ok(DeployLogDto {
+            exists: false,
+            content: String::new(),
+        }),
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct RestoreResultDto {
+    restored_files: usize,
+    backup_id: Option<String>,
+}
+
+/// 从快照恢复。恢复前会先把"当前状态"再备份一份，避免恢复本身变成不可逆操作。
+#[tauri::command(rename_all = "snake_case")]
+pub fn restore_snapshot(snapshot_id: String) -> Result<RestoreResultDto, String> {
+    if snapshot_id.contains('/') || snapshot_id.contains('\\') || snapshot_id.contains("..") {
+        return Err(format!("非法快照 id：{snapshot_id}"));
+    }
+    let ctx = Ctx::resolve();
+    let ws = Workspace::new(&ctx.user_dir);
+    let snap_dir = ws.snapshots_dir().join(&snapshot_id);
+    if !snap_dir.is_dir() {
+        return Err(format!("快照不存在：{snapshot_id}"));
+    }
+
+    let backup = snapshot::create(&ctx.user_dir, &ws.snapshots_dir(), "恢复前自动备份")
+        .map(|info| info.id)
+        .ok();
+
+    let restored =
+        snapshot::restore(&snap_dir, &ctx.user_dir).map_err(|e| format!("恢复失败：{e}"))?;
+
+    Ok(RestoreResultDto {
+        restored_files: restored,
+        backup_id: backup,
+    })
+}
+
+/// 在系统文件管理器里打开路径（仅做展示，不做读写）。
+#[tauri::command]
+pub fn reveal_path(path: String) -> Result<(), String> {
+    let ctx = Ctx::resolve();
+    let target = ctx.within_user_dir(std::path::Path::new(&path))?;
+
+    #[cfg(target_os = "macos")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("open");
+        c.arg("-R").arg(&target);
+        c
+    };
+    #[cfg(target_os = "windows")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("explorer");
+        c.arg("/select,").arg(&target);
+        c
+    };
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let mut cmd = {
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(target.parent().unwrap_or(&target));
+        c
+    };
+
+    cmd.status().map_err(|e| format!("打开失败：{e}"))?;
+    Ok(())
 }

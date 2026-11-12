@@ -29,6 +29,11 @@ fn main() {
             commands::get_schema_detail,
             commands::get_fuzzy_settings,
             commands::apply_fuzzy_settings,
+            commands::run_diagnostics,
+            commands::get_dict_inventory,
+            commands::read_deploy_log,
+            commands::restore_snapshot,
+            commands::reveal_path,
         ])
         .run(tauri::generate_context!())
         .expect("切韵启动失败");

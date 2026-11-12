@@ -93,3 +93,15 @@ cargo 侧建议：`CARGO_NET_RETRY=10 CARGO_HTTP_TIMEOUT=180 CARGO_HTTP_MULTIPLE
 - 因此 UI 必须写明"整段替换"的语义，并在 `source !== build` 时警告"尚未部署，基线可能不完整"。
 - 简繁开关（本机叫 `transcription`）与双拼键位都强耦合方案内容，V1 只读展示，
   不做生成式编辑——画错键位比不画更危险。
+
+## M5：诊断与词典盘点
+
+- 体检 10 项：用户目录、installation.yaml、schema_list、方案文件完整性、custom YAML 语法、
+  build 产物、**配置与产物新鲜度**、托管键漂移、部署锁残留、共享目录。
+  每项都附"下一步动作"，并区分 fail（致命）与 warn（提醒）。
+- 新鲜度比较用文件 mtime：源配置比 build 新 → 提醒"改动可能尚未生效"。本机实测直接命中
+  （build 停留在 2024-07，配置文件更新），证明这个检查有真实价值。
+- 词典 V1 只盘点：`*.dict.yaml`（user/shared）、`*.userdb`（LevelDB 目录大小递归统计）、
+  `sync_dir`、build 产物数。**删词/词频/导入导出必须等 librime user_dict FFI**，不猜格式。
+- 快照恢复前会再自动备份一次当前状态，避免"恢复"本身变成不可逆操作。
+- 部署日志落盘 `.qieyun/last-deploy.log`，诊断页可直接读。

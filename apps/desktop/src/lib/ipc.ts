@@ -79,11 +79,68 @@ export interface Snapshot {
   id: string;
   created_at: string;
   note: string;
+  /** 快照包含的配置文件数（后端 list_snapshots 提供）。 */
+  file_count?: number;
 }
 
 export interface DeployResult {
   ok: boolean;
   log: string;
+}
+
+/** 体检单条结果的状态：正常 / 提醒 / 失败（Rust `CheckStatus`，小写序列化）。 */
+export type CheckStatus = "ok" | "warn" | "fail";
+
+/** `run_diagnostics()` 的单项：`hint` 是可执行的下一条动作，可能缺省。 */
+export interface DiagnosticsCheck {
+  id: string;
+  title: string;
+  status: CheckStatus;
+  detail: string;
+  hint: string | null;
+}
+
+export interface DiagnosticsReport {
+  checks: DiagnosticsCheck[];
+  ok: number;
+  warn: number;
+  fail: number;
+}
+
+/** 词典文件来源：用户目录 / 共享目录（Rust `DictScope`）。 */
+export type DictScope = "user" | "shared";
+
+export interface DictFile {
+  name: string;
+  scope: DictScope;
+  size_bytes: number;
+}
+
+/** 用户词库：LevelDB 是目录，legacy 的是 `*.userdb.txt` 文本。 */
+export interface UserDb {
+  name: string;
+  size_bytes: number;
+  legacy_text: boolean;
+}
+
+export interface DictInventory {
+  dicts: DictFile[];
+  userdbs: UserDb[];
+  sync_dir: string | null;
+  /** `build/` 里的编译产物数量（`.bin` + `.schema.yaml`）。 */
+  build_artifacts: number;
+}
+
+/** `read_deploy_log()`：最近一次部署日志；不存在时 `exists=false`、`content` 为空串。 */
+export interface DeployLog {
+  exists: boolean;
+  content: string;
+}
+
+/** `restore_snapshot()`：恢复前后端会先自动备份当前状态。 */
+export interface RestoreResult {
+  restored_files: number;
+  backup_id: string | null;
 }
 
 export interface FileContent {
@@ -205,6 +262,11 @@ export interface IpcContract {
   get_fuzzy_settings: { args: undefined; result: FuzzySettings };
   apply_fuzzy_settings: { args: { schema_id: string; groups: string[] }; result: WriteResult };
   apply_and_deploy: { args: undefined; result: DeployResult };
+  run_diagnostics: { args: undefined; result: DiagnosticsReport };
+  get_dict_inventory: { args: undefined; result: DictInventory };
+  read_deploy_log: { args: undefined; result: DeployLog };
+  restore_snapshot: { args: { snapshot_id: string }; result: RestoreResult };
+  reveal_path: { args: { path: string }; result: void };
 }
 
 export type IpcCommand = keyof IpcContract;
@@ -247,11 +309,135 @@ const MOCK_PROFILE: Profile = {
   default_schema: "rime_ice",
 };
 
-const MOCK_SNAPSHOTS: Snapshot[] = [
+/** mock 快照列表会在内存中推进（新建 / 恢复前自动备份），让页面流程完整可走。 */
+let mockSnapshots: Snapshot[] = [
   { id: "20261111-1928", created_at: "2026-11-11 19:28", note: "初始化工作台" },
   { id: "20261110-2142", created_at: "2026-11-10 21:42", note: "切换默认方案为雾凇拼音" },
   { id: "20261109-1035", created_at: "2026-11-09 10:35", note: "调整候选窗字号" },
 ];
+
+function mockStamp(): string {
+  const now = new Date();
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`;
+}
+
+function mockSnapshotId(): string {
+  const now = new Date();
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+}
+
+/** mock 的 id 精确到秒：同一秒内连续操作时补后缀，避免 React list key 冲突。 */
+function mockUniqueSnapshotId(): string {
+  const base = mockSnapshotId();
+  let id = base;
+  let suffix = 2;
+  while (mockSnapshots.some((item) => item.id === id)) {
+    id = `${base}-${suffix}`;
+    suffix += 1;
+  }
+  return id;
+}
+
+// ---------------------------------------------------------------------------
+// 诊断 / 词典 / 部署日志 mock
+// ---------------------------------------------------------------------------
+
+/**
+ * 体检的初始 mock：3 通过 / 1 提醒 / 1 失败。
+ * 「构建产物是否最新」在 mock 部署一次后转为通过，用来验证页面刷新会跟着 build 状态变化。
+ */
+function mockDiagnostics(): DiagnosticsReport {
+  const checks: DiagnosticsCheck[] = [
+    {
+      id: "user-dir",
+      title: "Rime 用户目录",
+      status: "ok",
+      detail: "~/Library/Rime · 12 个配置文件",
+      hint: null,
+    },
+    {
+      id: "shared-dir",
+      title: "共享目录",
+      status: "ok",
+      detail: "/Library/Input Methods/Squirrel.app/Contents/Resources",
+      hint: null,
+    },
+    {
+      id: "default-schema",
+      title: "默认方案可加载",
+      status: "ok",
+      detail: "rime_ice · 雾凇拼音",
+      hint: null,
+    },
+    mockDeployed
+      ? {
+          id: "build-fresh",
+          title: "构建产物是否最新",
+          status: "ok",
+          detail: "build/ 已跟随最近的 custom.yaml 重建",
+          hint: null,
+        }
+      : {
+          id: "build-stale",
+          title: "构建产物是否最新",
+          status: "warn",
+          detail: "build/ 落后于 3 个 custom.yaml",
+          hint: "点「保存并部署」重建一次；若仍提示，检查这些 yaml 是否有语法错误。",
+        },
+    {
+      id: "plugin",
+      title: "插件目录",
+      status: "fail",
+      detail: "未发现 librime-lua 插件",
+      hint: "需要 lua 插件时，把 librime-lua.dylib 放进用户目录的 plugins/ 后重启输入法。",
+    },
+  ];
+  return {
+    checks,
+    ok: checks.filter((check) => check.status === "ok").length,
+    warn: checks.filter((check) => check.status === "warn").length,
+    fail: checks.filter((check) => check.status === "fail").length,
+  };
+}
+
+const MOCK_DICT_INVENTORY: DictInventory = {
+  dicts: [
+    { name: "rime_ice.dict.yaml", scope: "user", size_bytes: 1_258_291 },
+    { name: "luna_pinyin.dict.yaml", scope: "shared", size_bytes: 3_942_400 },
+  ],
+  userdbs: [{ name: "rime_ice.userdb", size_bytes: 2_411_724, legacy_text: false }],
+  sync_dir: "~/Library/Mobile Documents/com~apple~CloudDocs/Rime",
+  build_artifacts: 12,
+};
+
+const MOCK_DEPLOY_LOG_LINES = [
+  "[19:28:01] 读取用户目录 ~/Library/Rime",
+  "[19:28:01] 校验 default.custom.yaml",
+  "[19:28:02] 编译 rime_ice.schema.yaml -> build/rime_ice.schema.yaml",
+  "[19:28:02] 写入 build/rime_ice.prism.bin",
+  "[19:28:03] 警告：luna_pinyin.dict.yaml 未被任何方案引用",
+  "[19:28:03] 部署完成，耗时 1.24s",
+];
+
+let mockDeployLog: DeployLog = {
+  exists: true,
+  content: MOCK_DEPLOY_LOG_LINES.join("\n"),
+};
+
+/** mock 是否已经部署过：决定「构建产物是否最新」这条检查的状态。 */
+let mockDeployed = false;
+
+/** 模拟一次部署：刷新日志并让 build 检查转为通过。 */
+function mockRecordDeploy(log: string): DeployLog {
+  mockDeployed = true;
+  mockDeployLog = {
+    exists: true,
+    content: log.trim() ? log : MOCK_DEPLOY_LOG_LINES.join("\n"),
+  };
+  return mockDeployLog;
+}
 
 const MOCK_FILE_CONTENT: FileContent = {
   content: [
@@ -631,17 +817,22 @@ export const ipc = {
   },
 
   listSnapshots(): Promise<Snapshot[]> {
-    return call("list_snapshots", undefined, () => MOCK_SNAPSHOTS);
+    return call("list_snapshots", undefined, () => mockSnapshots.map((item) => ({ ...item })));
   },
 
   createSnapshot(note: string): Promise<{ id: string }> {
-    return call("create_snapshot", { note }, () => ({
-      id: `snapshot-${Date.now().toString(36)}`,
-    }));
+    return call("create_snapshot", { note }, () => {
+      const id = mockUniqueSnapshotId();
+      mockSnapshots = [{ id, created_at: mockStamp(), note }, ...mockSnapshots];
+      return { id };
+    });
   },
 
   deploy(): Promise<DeployResult> {
-    return call("deploy", undefined, () => MOCK_DEPLOY_RESULT);
+    return call("deploy", undefined, () => {
+      mockRecordDeploy(MOCK_DEPLOY_RESULT.log);
+      return MOCK_DEPLOY_RESULT;
+    });
   },
 
   readFile(path: string): Promise<FileContent> {
@@ -721,7 +912,49 @@ export const ipc = {
   },
 
   applyAndDeploy(): Promise<DeployResult> {
-    return call("apply_and_deploy", undefined, () => MOCK_DEPLOY_RESULT);
+    return call("apply_and_deploy", undefined, () => {
+      mockRecordDeploy(MOCK_DEPLOY_RESULT.log);
+      return MOCK_DEPLOY_RESULT;
+    });
+  },
+
+  runDiagnostics(): Promise<DiagnosticsReport> {
+    return call("run_diagnostics", undefined, () => mockDiagnostics());
+  },
+
+  getDictInventory(): Promise<DictInventory> {
+    return call("get_dict_inventory", undefined, () => ({
+      dicts: MOCK_DICT_INVENTORY.dicts.map((dict) => ({ ...dict })),
+      userdbs: MOCK_DICT_INVENTORY.userdbs.map((db) => ({ ...db })),
+      sync_dir: MOCK_DICT_INVENTORY.sync_dir,
+      build_artifacts: MOCK_DICT_INVENTORY.build_artifacts,
+    }));
+  },
+
+  readDeployLog(): Promise<DeployLog> {
+    return call("read_deploy_log", undefined, () => ({ ...mockDeployLog }));
+  },
+
+  restoreSnapshot(snapshotId: string): Promise<RestoreResult> {
+    // Rust 的 `restore_snapshot(snapshot_id: String)` 没有声明 `rename_all = "snake_case"`，
+    // Tauri 2 默认按 camelCase 取键；两种拼写都带上，后端补 rename_all 后也不会坏。
+    const args = { snapshot_id: snapshotId, snapshotId } as {
+      snapshot_id: string;
+      snapshotId?: string;
+    };
+    return call("restore_snapshot", args, () => {
+      const backupId = mockUniqueSnapshotId();
+      // 与后端一致：恢复前先把当前状态备份成一个新快照。
+      mockSnapshots = [
+        { id: backupId, created_at: mockStamp(), note: "恢复前自动备份" },
+        ...mockSnapshots,
+      ];
+      return { restored_files: 3, backup_id: backupId };
+    });
+  },
+
+  revealPath(path: string): Promise<void> {
+    return call("reveal_path", { path }, () => undefined);
   },
 };
 

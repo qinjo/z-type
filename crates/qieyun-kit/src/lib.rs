@@ -10,6 +10,8 @@
 //! 对应文档：`docs/architecture.md` §4/§5，决策记录见 `docs/adr/`。
 
 pub mod detail;
+pub mod diagnostics;
+pub mod dicts;
 pub mod env;
 pub mod fuzzy;
 pub mod input;
@@ -24,6 +26,7 @@ pub mod time;
 pub mod workspace;
 
 pub use detail::{read_schema_detail, DetailSource, SchemaDetail, SwitchInfo};
+pub use diagnostics::{Check, CheckStatus, DiagnosticsReport};
 pub use env::{probe, EnvInfo, InstallationMeta};
 pub use input::{AsciiToggleKey, InputSettings, PageKeys, SettingsError};
 pub use manifest::{Drift, State};
