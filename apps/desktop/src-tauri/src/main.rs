@@ -34,6 +34,11 @@ fn main() {
             commands::read_deploy_log,
             commands::restore_snapshot,
             commands::reveal_path,
+            commands::list_user_files,
+            commands::write_raw_file,
+            commands::reset_managed_keys,
+            commands::clear_deploy_lock,
+            commands::parse_deploy_log,
         ])
         .run(tauri::generate_context!())
         .expect("切韵启动失败");

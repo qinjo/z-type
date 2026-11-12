@@ -9,10 +9,12 @@
 //!
 //! 对应文档：`docs/architecture.md` §4/§5，决策记录见 `docs/adr/`。
 
+pub mod deploy_log;
 pub mod detail;
 pub mod diagnostics;
 pub mod dicts;
 pub mod env;
+pub mod files;
 pub mod fuzzy;
 pub mod input;
 pub mod manifest;
@@ -34,4 +36,4 @@ pub use patch::{apply_edits, CreatePolicy, Edit, PatchError};
 pub use platform::Platform;
 pub use profile::{Profile, SchemaEntry};
 pub use theme::{Colors, Font, Layout, Orientation, Rgba, Theme};
-pub use workspace::{Workspace, WriteError, WriteOutcome};
+pub use workspace::{RawWrite, Workspace, WriteError, WriteOutcome};

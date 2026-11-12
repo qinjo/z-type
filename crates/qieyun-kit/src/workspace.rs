@@ -327,6 +327,87 @@ mod tests {
 }
 
 // ---------------------------------------------------------------------------
+// 高级页：原始文件写入 / 危险操作
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawWrite {
+    pub snapshot_id: Option<String>,
+    pub bytes: usize,
+}
+
+impl Workspace {
+    /// 校验原始编辑目标：只允许用户目录根层的 `.yaml/.yml/.txt`，且不允许词典文件。
+    pub fn raw_editable_file(&self, name: &str) -> Result<PathBuf, WriteError> {
+        let lower = name.to_lowercase();
+        let bad = name.contains('/')
+            || name.contains('\\')
+            || name.contains("..")
+            || !(lower.ends_with(".yaml") || lower.ends_with(".yml") || lower.ends_with(".txt"))
+            || lower.ends_with(".dict.yaml");
+        if bad {
+            return Err(WriteError::InvalidFile(name.to_string()));
+        }
+        Ok(self.user_dir.join(name))
+    }
+
+    /// 高级页的原始写入：先校验 YAML 合法，再快照、原子落盘。
+    ///
+    /// 注意：原始编辑**不会**更新托管键清单——这正是设计意图：
+    /// 用户绕开 GUI 手改后，下一次结构化写入会触发漂移检测并要求确认。
+    pub fn write_raw(
+        &self,
+        name: &str,
+        content: &str,
+        note: Option<&str>,
+    ) -> Result<RawWrite, WriteError> {
+        let path = self.raw_editable_file(name)?;
+        let is_yaml =
+            name.to_lowercase().ends_with(".yaml") || name.to_lowercase().ends_with(".yml");
+        if is_yaml && !content.trim().is_empty() {
+            serde_yaml::from_str::<serde_yaml::Value>(content).map_err(|e| WriteError::Patch {
+                file: name.to_string(),
+                source: crate::patch::PatchError::Parse(e.to_string()),
+            })?;
+        }
+
+        let snapshot_id = if self.user_dir.is_dir() {
+            self.ensure_dirs()?;
+            Some(
+                crate::snapshot::create(
+                    &self.user_dir,
+                    &self.snapshots_dir(),
+                    note.unwrap_or("原始文件编辑前自动备份"),
+                )
+                .map_err(|e| WriteError::Backup(e.to_string()))?
+                .id,
+            )
+        } else {
+            None
+        };
+
+        atomic_write(&path, content).map_err(|source| WriteError::Io {
+            file: name.to_string(),
+            source,
+        })?;
+        Ok(RawWrite {
+            snapshot_id,
+            bytes: content.len(),
+        })
+    }
+
+    /// 危险操作：清空托管键清单（不动任何配置文件）。
+    pub fn reset_managed_keys(&self) -> bool {
+        std::fs::remove_file(self.state_path()).is_ok()
+    }
+
+    /// 危险操作：清理残留的部署锁。
+    pub fn clear_deploy_lock(&self) -> bool {
+        std::fs::remove_file(self.meta_dir().join("deploy.lock")).is_ok()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // 首启接管与主题应用
 // ---------------------------------------------------------------------------
 
@@ -441,5 +522,75 @@ mod takeover_tests {
         w.apply_theme(theme, Platform::Macos, None).unwrap();
         let second = std::fs::read_to_string(w.user_dir.join("squirrel.custom.yaml")).unwrap();
         assert_eq!(first, second);
+    }
+}
+
+#[cfg(test)]
+mod raw_edit_tests {
+    use super::*;
+
+    fn ws(tag: &str) -> Workspace {
+        let dir = std::env::temp_dir().join(format!(
+            "qieyun-raw-{tag}-{}-{}",
+            std::process::id(),
+            crate::time::now_unix()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        Workspace::new(dir)
+    }
+
+    #[test]
+    fn raw_write_validates_yaml_and_backs_up() {
+        let w = ws("ok");
+        std::fs::write(w.user_dir.join("default.custom.yaml"), "patch:\n  a: 1\n").unwrap();
+
+        let out = w
+            .write_raw("default.custom.yaml", "patch:\n  a: 2\n", Some("手改"))
+            .unwrap();
+        assert!(out.snapshot_id.is_some());
+        assert_eq!(
+            std::fs::read_to_string(w.user_dir.join("default.custom.yaml")).unwrap(),
+            "patch:\n  a: 2\n"
+        );
+
+        // 坏 YAML 必须被拒绝，且不落盘
+        let err = w
+            .write_raw("default.custom.yaml", "patch: [\n", None)
+            .unwrap_err();
+        assert!(matches!(err, WriteError::Patch { .. }));
+        assert_eq!(
+            std::fs::read_to_string(w.user_dir.join("default.custom.yaml")).unwrap(),
+            "patch:\n  a: 2\n"
+        );
+    }
+
+    #[test]
+    fn raw_write_rejects_dict_and_paths() {
+        let w = ws("bad");
+        for name in ["rime_ice.dict.yaml", "../evil.yaml", "sub/x.yaml", "a.bin"] {
+            assert!(
+                matches!(w.raw_editable_file(name), Err(WriteError::InvalidFile(_))),
+                "{name} 应被拒绝"
+            );
+        }
+        assert!(w.raw_editable_file("rime_ice.custom.yaml").is_ok());
+        assert!(w.raw_editable_file("notes.txt").is_ok());
+    }
+
+    #[test]
+    fn dangerous_operations_are_idempotent() {
+        let w = ws("danger");
+        let state = State::default();
+        state.save(&w.state_path()).unwrap();
+        std::fs::create_dir_all(w.meta_dir()).unwrap();
+        std::fs::write(w.meta_dir().join("deploy.lock"), "old").unwrap();
+
+        assert!(w.reset_managed_keys());
+        assert!(!w.is_taken_over());
+        assert!(!w.reset_managed_keys(), "重复清理应返回 false");
+
+        assert!(w.clear_deploy_lock());
+        assert!(!w.clear_deploy_lock());
     }
 }

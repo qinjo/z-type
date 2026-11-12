@@ -105,3 +105,14 @@ cargo 侧建议：`CARGO_NET_RETRY=10 CARGO_HTTP_TIMEOUT=180 CARGO_HTTP_MULTIPLE
   `sync_dir`、build 产物数。**删词/词频/导入导出必须等 librime user_dict FFI**，不猜格式。
 - 快照恢复前会再自动备份一次当前状态，避免"恢复"本身变成不可逆操作。
 - 部署日志落盘 `.qieyun/last-deploy.log`，诊断页可直接读。
+
+## M5 收尾：原始编辑与部署错误解析
+
+- 高级页的原始写入走 `Workspace::write_raw`：只允许用户目录根层 `.yaml/.yml/.txt`，
+  `.dict.yaml` 与任何带路径分隔符的名字一律拒绝；写前先做 YAML 解析校验（坏的不落盘），
+  再自动快照后原子写入。**原始编辑不更新托管键清单**——这是故意的：
+  下一次结构化写入会因此触发漂移检测，从而不会悄悄覆盖手改内容。
+- 部署日志解析基于实测格式：
+  `E20261112 09:57:21.608622 0x7ff8490d1bc0 deployment_tasks.cc:212] missing input schema: ghost`
+  → 级别 / 源位置 / 消息 / 命中文件 / 下一步动作（hint）。未知错误仍然原样保留，不丢信息。
+- 危险操作（重置托管键、清部署锁）都实现为幂等，并在 UI 里写明可逆性。

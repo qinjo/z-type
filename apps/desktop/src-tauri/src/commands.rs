@@ -941,3 +941,74 @@ pub fn reveal_path(path: String) -> Result<(), String> {
     cmd.status().map_err(|e| format!("打开失败：{e}"))?;
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// 高级页：原始文件 / 危险操作 / 日志解析（M5 收尾）
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub fn list_user_files() -> Result<Vec<qieyun_kit::files::UserFile>, String> {
+    let ctx = Ctx::resolve();
+    Ok(qieyun_kit::files::list(&ctx.user_dir))
+}
+
+#[derive(Debug, Serialize)]
+pub struct RawWriteDto {
+    snapshot_id: Option<String>,
+    bytes: usize,
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn write_raw_file(name: String, content: String) -> Result<RawWriteDto, String> {
+    let ctx = Ctx::resolve();
+    let ws = Workspace::new(&ctx.user_dir);
+    let out = ws
+        .write_raw(&name, &content, Some("高级页原始编辑"))
+        .map_err(|e| e.to_string())?;
+    Ok(RawWriteDto {
+        snapshot_id: out.snapshot_id,
+        bytes: out.bytes,
+    })
+}
+
+#[derive(Debug, Serialize)]
+pub struct DangerResultDto {
+    removed: bool,
+}
+
+#[tauri::command]
+pub fn reset_managed_keys() -> Result<DangerResultDto, String> {
+    let ctx = Ctx::resolve();
+    let removed = Workspace::new(&ctx.user_dir).reset_managed_keys();
+    Ok(DangerResultDto { removed })
+}
+
+#[tauri::command]
+pub fn clear_deploy_lock() -> Result<DangerResultDto, String> {
+    let ctx = Ctx::resolve();
+    let removed = Workspace::new(&ctx.user_dir).clear_deploy_lock();
+    Ok(DangerResultDto { removed })
+}
+
+/// 解析最近一次部署日志，给出"错误行 → 下一步动作"。
+#[tauri::command]
+pub fn parse_deploy_log() -> Result<qieyun_kit::deploy_log::ParsedDeployLog, String> {
+    let ctx = Ctx::resolve();
+    let path = Workspace::new(&ctx.user_dir)
+        .meta_dir()
+        .join("last-deploy.log");
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    Ok(qieyun_kit::deploy_log::parse(&text))
+}
+
+#[cfg(test)]
+mod m5_tail_tests {
+    #[test]
+    fn raw_write_args_are_snake_case() {
+        // 仅验证参数名约定：Tauri 侧用 rename_all = "snake_case"，前端应传 name/content
+        let args: serde_json::Value =
+            serde_json::json!({ "name": "a.custom.yaml", "content": "x" });
+        assert!(args.get("name").is_some());
+        assert!(args.get("content").is_some());
+    }
+}

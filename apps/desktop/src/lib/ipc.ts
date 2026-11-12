@@ -143,6 +143,59 @@ export interface RestoreResult {
   backup_id: string | null;
 }
 
+/** 用户目录里的文件类别（Rust `FileKind`，snake_case 序列化）。 */
+export type UserFileKind =
+  | "custom"
+  | "config"
+  | "schema"
+  | "dict"
+  | "installation"
+  | "other";
+
+/** `list_user_files()` 的单行：`.yaml` / `.yml` / `.txt` 文件。 */
+export interface UserFile {
+  name: string;
+  size_bytes: number;
+  /** ISO8601 UTC；读不到 mtime 时为 null。 */
+  modified: string | null;
+  kind: UserFileKind;
+  /** dict 与只读文件为 false，高级页不会把它们塞进编辑器。 */
+  editable: boolean;
+}
+
+/** `write_raw_file()`：写入前自动快照，返回快照 id（用户目录不存在时为 null）与字节数。 */
+export interface RawWriteResult {
+  snapshot_id: string | null;
+  bytes: number;
+}
+
+/** 危险操作（`reset_managed_keys` / `clear_deploy_lock`）的统一返回。 */
+export interface DangerResult {
+  removed: boolean;
+}
+
+/** 部署日志级别（Rust `LogLevel`，小写序列化）。 */
+export type DeployLogLevel = "error" | "warning" | "info";
+
+/** `parse_deploy_log()` 的单项：源位置、涉及文件与下一步动作都可能缺省。 */
+export interface DeployLogEntry {
+  level: DeployLogLevel;
+  /** 例如 `deployment_tasks.cc:212`。 */
+  source: string | null;
+  message: string;
+  /** 消息里提到的文件名（.yaml / .bin 等）。 */
+  files: string[];
+  hint: string | null;
+}
+
+/** `parse_deploy_log()`：最近一次部署日志的解析结果；`unparsed` 保留无法识别的行。 */
+export interface ParsedDeployLog {
+  entries: DeployLogEntry[];
+  errors: number;
+  warnings: number;
+  unparsed: string[];
+}
+
 export interface FileContent {
   content: string;
 }
@@ -267,6 +320,11 @@ export interface IpcContract {
   read_deploy_log: { args: undefined; result: DeployLog };
   restore_snapshot: { args: { snapshot_id: string }; result: RestoreResult };
   reveal_path: { args: { path: string }; result: void };
+  list_user_files: { args: undefined; result: UserFile[] };
+  write_raw_file: { args: { name: string; content: string }; result: RawWriteResult };
+  reset_managed_keys: { args: undefined; result: DangerResult };
+  clear_deploy_lock: { args: undefined; result: DangerResult };
+  parse_deploy_log: { args: undefined; result: ParsedDeployLog };
 }
 
 export type IpcCommand = keyof IpcContract;
@@ -437,6 +495,215 @@ function mockRecordDeploy(log: string): DeployLog {
     content: log.trim() ? log : MOCK_DEPLOY_LOG_LINES.join("\n"),
   };
   return mockDeployLog;
+}
+
+// ---------------------------------------------------------------------------
+// 高级页（原始文件 / 危险操作）与部署日志解析 mock
+// ---------------------------------------------------------------------------
+
+/** mock 用户目录的内容：文件清单、大小与 read_file 都从这里派生。 */
+interface MockUserFile {
+  kind: UserFileKind;
+  editable: boolean;
+  /** ISO8601 UTC。 */
+  modified: string;
+  content: string;
+}
+
+/**
+ * 高级页的文件清单 mock。
+ * `installation.yaml` 与 `rime_ice.dict.yaml` 按后端规则为只读（`editable=false`），
+ * 用来验证「词典/只读文件不在编辑器内打开」的分支。
+ */
+const mockUserFiles: Record<string, MockUserFile> = {
+  "default.custom.yaml": {
+    kind: "custom",
+    editable: true,
+    modified: "2026-11-11T11:28:00Z",
+    content: [
+      "patch:",
+      "  schema_list:",
+      "    - schema: rime_ice",
+      "    - schema: double_pinyin_flypy",
+      "  menu:",
+      "    page_size: 7",
+      "",
+    ].join("\n"),
+  },
+  "default.yaml": {
+    kind: "config",
+    editable: true,
+    modified: "2026-11-09T02:35:00Z",
+    content: ["config_version: 0.1", "schema_list:", "  - schema: luna_pinyin", ""].join(
+      "\n",
+    ),
+  },
+  "rime_ice.schema.yaml": {
+    kind: "schema",
+    editable: true,
+    modified: "2026-11-10T13:42:00Z",
+    content: [
+      "schema:",
+      "  schema_id: rime_ice",
+      "  name: 雾凇拼音",
+      "  version: 2026.11.10",
+      "switches:",
+      "  - name: ascii_mode",
+      "    reset: 0",
+      "",
+    ].join("\n"),
+  },
+  "rime_ice.dict.yaml": {
+    kind: "dict",
+    editable: false,
+    modified: "2026-11-08T07:08:00Z",
+    // 字典通常几十 MB，这里只放一小段占位；编辑器不会打开它。
+    content: [
+      "# Rime dictionary",
+      "name: rime_ice",
+      "version: \"2026.11.08\"",
+      "sort: by_weight",
+      "columns:",
+      "  - text",
+      "  - code",
+      "  - weight",
+      "---",
+      "的\tn\t100",
+      "",
+    ].join("\n"),
+  },
+  "installation.yaml": {
+    kind: "installation",
+    editable: false,
+    modified: "2026-11-06T01:12:00Z",
+    content: ["distribution_code_name: Squirrel", "installation_id: qieyun-mock", ""].join(
+      "\n",
+    ),
+  },
+};
+
+function mockByteLength(text: string): number {
+  // TextEncoder 在浏览器与 Node 20 的全局作用域里都有；兜底按 UTF-16 长度估算。
+  if (typeof TextEncoder !== "undefined") return new TextEncoder().encode(text).length;
+  return text.length;
+}
+
+function mockUserFileList(): UserFile[] {
+  return Object.entries(mockUserFiles)
+    .map(([name, file]) => ({
+      name,
+      size_bytes: mockByteLength(file.content),
+      modified: file.modified,
+      kind: file.kind,
+      editable: file.editable,
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/**
+ * mock 的写回前校验：文件名规则与 Rust `raw_editable_file` 保持一致。
+ * 错误文案照抄后端 `WriteError::InvalidFile` 的中文原文，页面按原样展示。
+ */
+function mockRawEditableName(name: string): string | null {
+  const lower = name.toLowerCase();
+  const bad =
+    name.includes("/") ||
+    name.includes("\\") ||
+    name.includes("..") ||
+    lower.endsWith(".dict.yaml") ||
+    !(lower.endsWith(".yaml") || lower.endsWith(".yml") || lower.endsWith(".txt"));
+  if (bad) {
+    return `拒绝写入非 custom 文件或非法文件名：${name}`;
+  }
+  const known = mockUserFiles[name];
+  if (known && !known.editable) {
+    // 后端对这类文件同样走 InvalidFile；这里保留同一句文案，避免 mock 与真机行为分叉。
+    return `拒绝写入非 custom 文件或非法文件名：${name}`;
+  }
+  return null;
+}
+
+/**
+ * mock 的 YAML 语法检查（刻意粗糙）：只覆盖最高频的手滑场景——
+ * 缩进里出现 Tab、行尾悬空的键、括号/引号不配对。
+ * 真实后端用 serde_yaml，报错文案以它为准，这里只用于验证「原样展示错误」。
+ */
+function mockYamlError(content: string): string | null {
+  if (!content.trim()) return null;
+  const lines = content.split("\n");
+  let brackets = 0;
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index] ?? "";
+    if (/^\s*\t/.test(line)) {
+      return `第 ${index + 1} 行：缩进里出现 Tab，YAML 只允许空格缩进。`;
+    }
+    const text = line.replace(/#.*$/, "");
+    brackets += (text.match(/[[{]/g) ?? []).length;
+    brackets -= (text.match(/[\]}]/g) ?? []).length;
+    if (brackets < 0) {
+      return `第 ${index + 1} 行：括号不配对（多了一个 ] 或 }）。`;
+    }
+    if (/^\s*[^\s#][^:]*:\s*$/.test(text) && index + 1 < lines.length) {
+      const next = lines[index + 1] ?? "";
+      if (next.trim() && !/^\s*$/.test(next) && !/^(\s+|#|-)/.test(next)) {
+        return `第 ${index + 1} 行：键后面的值只能换行缩进或同一行给出。`;
+      }
+    }
+  }
+  if (brackets !== 0) return "括号不配对（[ ] / { } 没有闭合）。";
+  return null;
+}
+
+const mockDeployLogEntries: DeployLogEntry[] = [
+  {
+    level: "error",
+    source: "deployment_tasks.cc:212",
+    message: "missing input schema: ghost",
+    files: ["default.custom.yaml"],
+    hint: "方案 ghost 未安装或 id 拼错：在「方案与启用」里停用它，或安装对应方案后重新部署。",
+  },
+  {
+    level: "warning",
+    source: "deployment_tasks.cc:98",
+    message: "unrecognized key: menu/page_sizes",
+    files: ["default.custom.yaml"],
+    hint: "检查 YAML 缩进与键名拼写（page_size，不是 page_sizes）；改完再部署一次。",
+  },
+];
+
+const mockUnparsedLines = ["some stray output", "loading `rime_ice` ..."];
+
+/** 危险操作 mock 的前置状态：首次点击返回 `removed=true`，再点一次为 `false`。 */
+let mockManagedKeysPresent = true;
+let mockDeployLockPresent = true;
+
+/** 部署解析 mock：首次部署前有 1 错误 / 1 警告；部署一次后变成干净结果。 */
+function mockParseDeployLog(): ParsedDeployLog {
+  if (!mockDeployed) {
+    return {
+      entries: mockDeployLogEntries.map((entry) => ({
+        ...entry,
+        files: [...entry.files],
+      })),
+      errors: 1,
+      warnings: 1,
+      unparsed: [...mockUnparsedLines],
+    };
+  }
+  return {
+    entries: [
+      {
+        level: "info",
+        source: null,
+        message: "deployment succeeded, 耗时 1.24s",
+        files: [],
+        hint: null,
+      },
+    ],
+    errors: 0,
+    warnings: 0,
+    unparsed: [...mockUnparsedLines],
+  };
 }
 
 const MOCK_FILE_CONTENT: FileContent = {
@@ -836,7 +1103,12 @@ export const ipc = {
   },
 
   readFile(path: string): Promise<FileContent> {
-    return call("read_file", { path }, () => MOCK_FILE_CONTENT);
+    return call("read_file", { path }, () => {
+      // mock 里按文件名命中用户目录的清单；未命中的路径退回通用样例（兼容旧调用方）。
+      const name = path.replace(/^.*[/\\]/, "");
+      const known = mockUserFiles[name];
+      return known ? { content: known.content } : MOCK_FILE_CONTENT;
+    });
   },
 
   writeGuiConfig(patch: GuiPatch): Promise<WriteResult> {
@@ -955,6 +1227,64 @@ export const ipc = {
 
   revealPath(path: string): Promise<void> {
     return call("reveal_path", { path }, () => undefined);
+  },
+
+  /** 用户目录的文件清单（`.yaml` / `.yml` / `.txt`），已按文件名排序。 */
+  listUserFiles(): Promise<UserFile[]> {
+    return call("list_user_files", undefined, () => mockUserFileList());
+  },
+
+  /**
+   * 高级页原始写入：绕过 GUI 校验，后端先校验 YAML 合法、自动快照，再原子落盘。
+   * 失败时抛出的 message 就是 Rust `Err(String)` 原文，页面必须原样展示。
+   */
+  writeRawFile(name: string, content: string): Promise<RawWriteResult> {
+    return call("write_raw_file", { name, content }, () => {
+      const invalid = mockRawEditableName(name);
+      if (invalid) throw new Error(invalid);
+      const yamlError = mockYamlError(content);
+      if (yamlError) throw new Error(`处理 ${name} 失败：YAML 解析失败：${yamlError}`);
+
+      const previous = mockUserFiles[name];
+      const kind: UserFileKind = previous?.kind ?? "other";
+      const bytes = mockByteLength(content);
+      const snapshotId = mockUniqueSnapshotId();
+      // 与后端一致：写盘前先整包快照，并把快照登记到快照列表。
+      mockSnapshots = [
+        { id: snapshotId, created_at: mockStamp(), note: "高级页原始编辑" },
+        ...mockSnapshots,
+      ];
+      mockUserFiles[name] = {
+        kind,
+        editable: true,
+        modified: new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
+        content,
+      };
+      return { snapshot_id: snapshotId, bytes };
+    });
+  },
+
+  /** 删除 `.qieyun/state.json`（只清「哪些键归 GUI 管」的记录，不动任何配置）。 */
+  resetManagedKeys(): Promise<DangerResult> {
+    return call("reset_managed_keys", undefined, () => {
+      const removed = mockManagedKeysPresent;
+      mockManagedKeysPresent = false;
+      return { removed };
+    });
+  },
+
+  /** 删除残留的 `.qieyun/deploy.lock`；仅在确认没有部署进行中时使用。 */
+  clearDeployLock(): Promise<DangerResult> {
+    return call("clear_deploy_lock", undefined, () => {
+      const removed = mockDeployLockPresent;
+      mockDeployLockPresent = false;
+      return { removed };
+    });
+  },
+
+  /** 解析最近一次部署日志（`.qieyun/last-deploy.log`）。 */
+  parseDeployLog(): Promise<ParsedDeployLog> {
+    return call("parse_deploy_log", undefined, () => mockParseDeployLog());
   },
 };
 

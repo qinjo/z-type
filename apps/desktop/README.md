@@ -2,7 +2,7 @@
 
 跨平台 Rime 输入法可视化配置工作台的前端外壳。技术栈：**Tauri 2 + React 19 + TypeScript + Vite 6 + Tailwind CSS 3**。
 
-本目录是前端工作区，**前端构建（`pnpm build`）完全不依赖 Rust / Cargo**：`src/lib/ipc.ts` 会检测 Tauri 运行时，缺失时自动降级为 mock 数据。首启接管、外观主题、方案与启用、按键、模糊音、双拼、标点、词典、诊断与日志已接入真实 Tauri 命令（`get_takeover_plan` / `accept_takeover` / `list_theme_presets` / `apply_theme` / `scan_profile` / `get_input_settings` / `apply_input_settings` / `apply_and_deploy` / `get_schema_detail` / `get_fuzzy_settings` / `apply_fuzzy_settings` / `run_diagnostics` / `get_dict_inventory` / `read_deploy_log` / `restore_snapshot` / `reveal_path`），仅「高级」页仍为占位。
+本目录是前端工作区，**前端构建（`pnpm build`）完全不依赖 Rust / Cargo**：`src/lib/ipc.ts` 会检测 Tauri 运行时，缺失时自动降级为 mock 数据。首启接管、外观主题、方案与启用、按键、模糊音、双拼、标点、词典、诊断与日志已接入真实 Tauri 命令（`get_takeover_plan` / `accept_takeover` / `list_theme_presets` / `apply_theme` / `scan_profile` / `get_input_settings` / `apply_input_settings` / `apply_and_deploy` / `get_schema_detail` / `get_fuzzy_settings` / `apply_fuzzy_settings` / `run_diagnostics` / `get_dict_inventory` / `read_deploy_log` / `restore_snapshot` / `reveal_path` / `list_user_files` / `write_raw_file` / `reset_managed_keys` / `clear_deploy_lock` / `parse_deploy_log`），10 个页面均已接线，无占位页。
 
 ## 快速开始
 
@@ -75,6 +75,18 @@ pnpm tauri build      # 打包（需要图标/签名等发布配置）
 
 > 本轮只改 `apps/desktop/src/**` 与本 README，未触碰 `src-tauri/`、`crates/`、`docs/` 与根文件。
 
+### 高级页（原始编辑 + 危险操作）/ 部署错误解析接线后复验（2026-11-12）
+
+| 命令 | 结果 | 说明 |
+| --- | --- | --- |
+| `pnpm install` | ✅ exit 0 | `Done in 947ms`，`Lockfile is up to date`；pnpm 10 忽略 esbuild build script 的警告依旧存在，不影响构建 |
+| `pnpm build`（含 `tsc --noEmit`） | ✅ exit 0 | `61 modules transformed`；产物 `dist/index.html` 0.59 kB、CSS 22.13 kB、JS 375.80 kB（gzip 108.22 kB） |
+| `npx tsc --noEmit` | ✅ exit 0 | strict 模式，无错误 |
+| mock 流程冒烟（vite `ssrLoadModule` + `node:assert`） | ✅ | 文件清单 5 项且 dict / installation 为 `editable=false`；`read_file` 按文件名命中；`write_raw_file` 返回 `snapshot_id` 且字节数正确、写后 `read_file` 读到新内容并新增一条快照；非法文件名 / dict / Tab 缩进 / 括号未闭合四类错误均原样抛出且**不落盘**；`reset_managed_keys` / `clear_deploy_lock` 首次 `removed=true`、再次 `false`；`parse_deploy_log` 部署前 1 error（`missing input schema: ghost` + hint + source）+ 1 warning + 2 条 unparsed，`apply_and_deploy` 后 errors/warnings 归零且体检 build 检查转 ok |
+| 页面 SSR 渲染冒烟（`react-dom/server`） | ✅ | `Advanced` 6168 B / `Diagnostics` 7390 B，均渲染出「文件清单 / 原始编辑器 / 危险操作 / 部署错误解析」等关键区块 |
+
+> 本轮只改 `apps/desktop/src/**`（`lib/ipc.ts`、`pages/Advanced.tsx`、`pages/Diagnostics.tsx`）与本 README，未触碰 `src-tauri/`、`crates/`、`docs/` 与根文件。
+
 ## 目录结构
 
 ```text
@@ -144,8 +156,15 @@ apps/desktop/
 | `read_deploy_log` | — | `{ exists, content }` |
 | `restore_snapshot` | `{ snapshot_id: string }` | `{ restored_files, backup_id: string\|null }` |
 | `reveal_path` | `{ path: string }`（后端校验必须位于用户目录内） | —（成功时无返回） |
+| `list_user_files` | — | `{ name, size_bytes, modified: string\|null, kind: custom\|config\|schema\|dict\|installation\|other, editable }[]` |
+| `write_raw_file` | `{ name, content }` | `{ snapshot_id: string\|null, bytes }`（写前自动快照；YAML 非法或文件名非法时抛后端原文） |
+| `reset_managed_keys` | — | `{ removed }`（只删 `.qieyun/state.json`，不动配置） |
+| `clear_deploy_lock` | — | `{ removed }`（只删 `.qieyun/deploy.lock`） |
+| `parse_deploy_log` | — | `{ entries: {level: error\|warning\|info, source: string\|null, message, files: string[], hint: string\|null}[], errors, warnings, unparsed: string[] }` |
 
 `get_schema_detail` 的 Rust 签名是 `schema_id: Option<String>`，但命令没有声明 `rename_all = "snake_case"`——Tauri 2 默认按 camelCase 取参数（`schemaId`）。前端 IPC 层在调用时同时携带 `schema_id` 与 `schemaId` 两种拼写，后端将来补上 `rename_all` 也不会坏；`apply_fuzzy_settings` 声明了 `#[tauri::command(rename_all = "snake_case")]`，参数按契约传 snake_case 即可。
+
+`write_raw_file(name, content)` 声明了 `#[tauri::command(rename_all = "snake_case")]`，参数即 `name` / `content`；`list_user_files` / `reset_managed_keys` / `clear_deploy_lock` / `parse_deploy_log` 无参数。
 
 `restore_snapshot(snapshot_id: String)` 同样没有声明 `rename_all = "snake_case"`，前端按同一策略同时携带 `snapshot_id` 与 `snapshotId`。`reveal_path(path)` 是单词参数，无拼写差异。
 
@@ -167,14 +186,14 @@ apps/desktop/
 | 双拼 | 已接线：从 `scan_profile()` 筛 `is_shuangpin` 方案，展示名称/id/启用/是否默认；「启用 / 设为默认 / 停用」每次先 `get_input_settings()` 读最新再 `apply_input_settings()` 写回（默认方案禁止停用），可选应用后自动部署；右侧只读 `get_schema_detail()` 的 algebra 原文与 `source` 来源提示。明确标注 V1 不提供键位图（键位与 algebra 强耦合，画错比不画更危险）。 |
 | 标点与符号 | 已接线（只读）：`get_schema_detail()`（无参 = 默认方案）的 `punctuator.half_shape` 渲染成「按键 → 输出」两列表格（字符串 / `{commit}` / `{pair}` / 数组统一可读化），`full_shape` 可折叠，`switches` 只读小表格；`punctuator` 缺失或 `source=missing` 时提示继承自 default。V1 不提供编辑。 |
 | 词典 | 已接线（只读盘点 + 快照）：`get_dict_inventory()` 的四张统计卡（词典数 / 用户词库数与总大小 / 编译产物数 / 同步目录）；词典表（文件名、user/shared 徽标、人类可读大小）、用户词库表（LevelDB / legacy 文本、大小）与醒目说明「V1 只盘点不修改，删词/导入导出需 V2 的 user_dict API」；同步目录行（未配置时明确提示同步不会生效）；「新建快照」（`create_snapshot`）、快照列表（`list_snapshots`）与二次确认的「恢复」（`restore_snapshot`，toast 显示恢复文件数与自动备份 id）、「在 Finder 中显示」（`reveal_path` + `get_env_info().rime_user_dir`）。无词典时提示「可能是 plum 未安装方案」。 |
-| 高级 | 配置路径清单、行为开关、原始 YAML 只读预览（`read_file`）、危险操作区。 |
-| 诊断与日志 | 已接线：`run_diagnostics()` 顶部三张统计卡（通过 / 提醒 / 失败，失败用危险色）+ 检查项列表（色条 + 状态图标、detail、`→` 前缀的 hint，fail → warn → ok 排序）；`read_deploy_log()` 的等宽可折叠日志（保留换行、可复制，`exists=false` 显示「还没有部署记录」）；「保存并部署」（`apply_and_deploy` 后刷新日志与体检）、「恢复上一个快照」快捷入口（取 `list_snapshots()` 第一条，二次确认）。页头固定一句「这里只报告机器能判断的问题；每条都附下一步动作。」 |
+| 高级 | 已接线：顶部用户目录（`get_env_info`）+「在 Finder 中显示」（`reveal_path`）；`list_user_files()` 文件表（名称、类型徽标 custom/config/schema/dict/installation/other 分色、`formatBytes` 大小、本地时区修改时间、可编辑列）；点击可编辑文件在右侧编辑器打开（`read_file`），dict 与 `editable=false` 的行只展示元信息并 toast「词典/只读文件不在编辑器内打开（体积与风险）」；等宽 textarea + 行数/字符数/脏标记 + `Cmd/Ctrl+S` 保存（`write_raw_file`，toast 显示字节数与自动备份 id）、保存失败原样展示后端中文错误且保留输入、二次确认的「重新加载」；未保存时切换文件另需确认；危险操作区（红框，各两次确认）：「重置托管键清单」（`reset_managed_keys`，只删 `.qieyun/state.json`，不动配置）与「清理部署锁」（`clear_deploy_lock`，仅在确认无部署进行中时使用，锁下次部署自动重建），文案标明可逆性。页首固定「这里的修改绕过 GUI 校验，保存前会自动快照，但仍建议优先用对应页面。」 |
+| 诊断与日志 | 已接线：`run_diagnostics()` 顶部三张统计卡（通过 / 提醒 / 失败，失败用危险色）+ 检查项列表（色条 + 状态图标、detail、`→` 前缀的 hint，fail → warn → ok 排序）；`read_deploy_log()` 的等宽可折叠日志（保留换行、可复制，`exists=false` 显示「还没有部署记录」）；「保存并部署」（`apply_and_deploy` 后刷新日志与体检）、「恢复上一个快照」快捷入口（取 `list_snapshots()` 第一条，二次确认）。新增「部署错误解析」卡片（`parse_deploy_log()`，位于部署日志上方）：`errors>0` 时按 error → warning 列出条目（级别色条 + 徽标、`message`、`source` 如 `deployment_tasks.cc:212`、命中 `files`、`→` 前缀的 `hint`）；`errors===0 && warnings===0` 显示「最近一次部署没有错误/警告」；`unparsed` 非空时折叠展示原始行；「保存并部署」成功/失败后与日志、体检一起刷新解析结果。页头固定一句「这里只报告机器能判断的问题；每条都附下一步动作。」 |
 
 视觉：深色优先、低饱和、信息密度接近专业开发工具；中文优先字体栈（`system-ui / -apple-system / PingFang SC / Microsoft YaHei`）；仅手写 Button/Card/Field/Switch/Badge 等基础组件，未引入 UI 框架。
 
 ## 已明确的边界与遗留
 
-- 首启接管、外观主题、方案与启用、按键、模糊音、双拼、标点、词典（只读盘点 + 快照恢复）、诊断与日志已接真实 IPC；仅「高级」页与词库导入/导出/删词仍为占位。顶部「新建快照 / 部署」调用真实命令（无 Tauri 时为 mock），并给出 toast 反馈。
+- 首启接管、外观主题、方案与启用、按键、模糊音、双拼、标点、词典（只读盘点 + 快照恢复）、高级（原始文件编辑 + 危险操作）、诊断与日志（含部署错误解析）均已接真实 IPC；仅词库导入/导出/删词仍为占位。顶部「新建快照 / 部署」调用真实命令（无 Tauri 时为 mock），并给出 toast 反馈。
 - 用户词库是 LevelDB（或 legacy `*.userdb.txt`）格式，V1 只盘点大小与格式，不修改内容；删词/导入导出依赖内嵌 librime 的 `user_dict` API（V2）。`reveal_path` 只调用系统文件管理器，后端会校验路径位于用户目录内。
 - `list_snapshots` 的 DTO 只有 `{id, created_at, note}`，`snapshot::SnapshotInfo` 里的 `file_count` 没有透出，因此快照列表暂不展示文件数；如需展示，后端给 `SnapshotDto` 增加一个字段即可（前端契约加 `file_count?: number`）。
 - 模糊音写回会整段替换该方案的 `speller/algebra`（后端先剥离旧的模糊音规则再按当前选择重建）；双拼页只改 `schema_list`，不写 algebra；标点页 V1 只读，等后端能按方案安全 patch `punctuator` 的嵌套键后再开放编辑。

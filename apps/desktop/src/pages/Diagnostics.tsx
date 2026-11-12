@@ -8,6 +8,8 @@ import { cn } from "@/lib/cn";
 import {
   ipc,
   type CheckStatus,
+  type DeployLogEntry,
+  type DeployLogLevel,
   type DiagnosticsCheck,
 } from "@/lib/ipc";
 import { errorMessage, toast } from "@/lib/toast";
@@ -35,21 +37,49 @@ const STATUS_BAR = {
   fail: "bg-danger",
 } as const;
 
+/** 部署解析条目的展示规则：error → warning → info。 */
+const LOG_LEVEL_ORDER: Record<DeployLogLevel, number> = { error: 0, warning: 1, info: 2 };
+const LOG_LEVEL_LABEL: Record<DeployLogLevel, string> = {
+  error: "错误",
+  warning: "警告",
+  info: "信息",
+};
+const LOG_LEVEL_TONE = { error: "danger", warning: "warn", info: "neutral" } as const;
+const LOG_LEVEL_BAR = {
+  error: "bg-danger",
+  warning: "bg-warn/80",
+  info: "bg-faint/60",
+} as const;
+const LOG_LEVEL_TEXT = {
+  error: "text-danger",
+  warning: "text-warn",
+  info: "text-muted",
+} as const;
+
 function sortedChecks(checks: DiagnosticsCheck[]): DiagnosticsCheck[] {
   return [...checks].sort(
     (a, b) => STATUS_ORDER[a.status] - STATUS_ORDER[b.status],
   );
 }
 
+/** 部署解析结果排序：错误在前、警告其次；同级别内保持后端顺序。 */
+function sortedLogEntries(entries: DeployLogEntry[]): DeployLogEntry[] {
+  return [...entries].sort(
+    (a, b) => LOG_LEVEL_ORDER[a.level] - LOG_LEVEL_ORDER[b.level],
+  );
+}
+
 export function Diagnostics() {
   const report = useIpcQuery(() => ipc.runDiagnostics());
   const log = useIpcQuery(() => ipc.readDeployLog());
+  const parsed = useIpcQuery(() => ipc.parseDeployLog());
   const snapshots = useIpcQuery(() => ipc.listSnapshots());
   const env = useIpcQuery(() => ipc.getEnvInfo());
 
   const [busy, setBusy] = useState<Busy>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [logOpen, setLogOpen] = useState(true);
+  const [unparsedOpen, setUnparsedOpen] = useState(false);
   const [confirmingRestore, setConfirmingRestore] = useState(false);
 
   const checks = useMemo(
@@ -58,7 +88,13 @@ export function Diagnostics() {
   );
   const latestSnapshot = snapshots.data?.[0] ?? null;
 
-  /** 部署会改变 build/ 与 stale 状态，因此日志和体检都要重新拉取。 */
+  const logEntries = useMemo(
+    () => sortedLogEntries(parsed.data?.entries ?? []),
+    [parsed.data],
+  );
+  const hasLogProblems = (parsed.data?.errors ?? 0) > 0 || (parsed.data?.warnings ?? 0) > 0;
+
+  /** 部署会改变 build/ 与 stale 状态，因此日志、日志解析和体检都要重新拉取。 */
   async function saveAndDeploy() {
     if (busy) return;
     setBusy("deploy");
@@ -71,6 +107,7 @@ export function Diagnostics() {
       );
       setLogOpen(true);
       log.reload();
+      parsed.reload();
       report.reload();
     } catch (error) {
       setActionError(errorMessage(error));
@@ -94,6 +131,7 @@ export function Diagnostics() {
       snapshots.reload();
       report.reload();
       log.reload();
+      parsed.reload();
     } catch (error) {
       setActionError(errorMessage(error));
       toast("恢复快照失败，当前配置未被覆盖", "danger");
@@ -419,6 +457,148 @@ export function Diagnostics() {
           </Card>
         </div>
       </div>
+
+      <Card
+        title="部署错误解析"
+        description="parse_deploy_log() · 把最近一次部署的报错翻成「哪个文件 + 怎么办」"
+        className={cn(parsed.data && hasLogProblems && "border-danger/25")}
+        actions={
+          <div className="flex items-center gap-2">
+            {parsed.data ? (
+              parsed.data.errors > 0 ? (
+                <Badge tone="danger" dot>
+                  {parsed.data.errors} 错误 · {parsed.data.warnings} 警告
+                </Badge>
+              ) : parsed.data.warnings > 0 ? (
+                <Badge tone="warn" dot>
+                  {parsed.data.warnings} 警告
+                </Badge>
+              ) : (
+                <Badge tone="ok" dot>
+                  无错误
+                </Badge>
+              )
+            ) : null}
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={parsed.reload}
+              disabled={parsed.loading}
+            >
+              <Icon name="search" size={14} />
+              {parsed.loading ? "解析中…" : "重新解析"}
+            </Button>
+          </div>
+        }
+      >
+        {parsed.error ? (
+          <div className="flex items-start justify-between gap-4">
+            <p className="whitespace-pre-wrap text-xs leading-5 text-danger">
+              解析部署日志失败：{parsed.error}
+            </p>
+            <Button size="sm" variant="ghost" onClick={parsed.reload}>
+              重试
+            </Button>
+          </div>
+        ) : parsed.loading && !parsed.data ? (
+          <p className="text-xs text-faint">解析中…</p>
+        ) : !hasLogProblems ? (
+          <div className="rounded-md border border-ok/25 bg-ok/5 px-3 py-5 text-center">
+            <p className="text-xs text-ok">最近一次部署没有错误/警告</p>
+            <p className="mt-1 text-2xs leading-5 text-faint">
+              解析器没有在最后一份部署日志里找到 error / warning 级别的行。
+            </p>
+          </div>
+        ) : (
+          <ul className="space-y-2">
+            {logEntries.map((entry, index) => (
+              <li
+                key={`${entry.level}-${index}-${entry.source ?? ""}`}
+                className="flex items-start gap-3 rounded-md border border-line-soft bg-base/30 px-3 py-2.5"
+              >
+                <span
+                  aria-hidden="true"
+                  className={cn(
+                    "mt-0.5 h-9 w-1 shrink-0 rounded-full",
+                    LOG_LEVEL_BAR[entry.level],
+                  )}
+                />
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                    <Badge tone={LOG_LEVEL_TONE[entry.level]}>
+                      {LOG_LEVEL_LABEL[entry.level]}
+                    </Badge>
+                    {entry.source && (
+                      <span
+                        className="font-mono text-2xs text-faint/80"
+                        title="librime 报错的源位置"
+                      >
+                        {entry.source}
+                      </span>
+                    )}
+                  </div>
+                  <p
+                    className={cn(
+                      "mt-1 whitespace-pre-wrap break-words font-mono text-2xs leading-5",
+                      LOG_LEVEL_TEXT[entry.level],
+                    )}
+                  >
+                    {entry.message}
+                  </p>
+                  {entry.files.length > 0 && (
+                    <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                      <span className="text-2xs text-faint">涉及文件</span>
+                      {entry.files.map((file) => (
+                        <span
+                          key={file}
+                          className="rounded border border-line bg-raised/60 px-1.5 py-0.5 font-mono text-2xs text-muted"
+                        >
+                          {file}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  {entry.hint && (
+                    <p className="mt-1 flex items-start gap-1.5 text-2xs leading-5 text-faint">
+                      <span aria-hidden="true" className="shrink-0 text-accent">
+                        →
+                      </span>
+                      <span className="min-w-0 break-words">{entry.hint}</span>
+                    </p>
+                  )}
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+
+        {(parsed.data?.unparsed.length ?? 0) > 0 && (
+          <div className="mt-3 border-t border-line-soft pt-2.5">
+            <button
+              type="button"
+              onClick={() => setUnparsedOpen((open) => !open)}
+              aria-expanded={unparsedOpen}
+              className="flex w-full items-center gap-1.5 text-2xs text-faint transition-colors hover:text-muted"
+            >
+              <Icon
+                name="chevron"
+                size={12}
+                className={cn(
+                  "transition-transform",
+                  unparsedOpen ? "rotate-90" : "rotate-0",
+                )}
+              />
+              {unparsedOpen ? "收起" : "展开"}无法解析的行（
+              {parsed.data?.unparsed.length ?? 0} 行）
+            </button>
+            {unparsedOpen && (
+              <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-md border border-line bg-base/60 p-3 font-mono text-2xs leading-5 text-faint">
+                {(parsed.data?.unparsed ?? []).join("\n")}
+              </pre>
+            )}
+          </div>
+        )}
+      </Card>
 
       <Card
         title="部署日志"
