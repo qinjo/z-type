@@ -116,3 +116,21 @@ cargo 侧建议：`CARGO_NET_RETRY=10 CARGO_HTTP_TIMEOUT=180 CARGO_HTTP_MULTIPLE
   `E20261112 09:57:21.608622 0x7ff8490d1bc0 deployment_tasks.cc:212] missing input schema: ghost`
   → 级别 / 源位置 / 消息 / 命中文件 / 下一步动作（hint）。未知错误仍然原样保留，不丢信息。
 - 危险操作（重置托管键、清部署锁）都实现为幂等，并在 UI 里写明可逆性。
+
+## FFI 探针（2026-11-12）：进程内引擎已跑通
+
+结论：**C shim + 窄 ABI** 可行，且比 bindgen/手抄 `RimeApi` 更稳。
+
+- 用 `crates/qieyun-ffi`：`src/shim.c` 直接 `#include <rime_api.h>`，对 Rust 只暴露
+  `qz_deploy / qz_create / qz_session_new / qz_process_key / qz_context / qz_select` 等十来个函数。
+  升级 librime 只需重编 shim，不用重抄几十个函数指针。
+- 构建：`build.rs` 调 `clang` 编 C、`ar` 打静态库，再链接 `librime` dylib 并写入 rpath；
+  找不到 librime 时编译 `src/shim_stub.c`，crate 仍可构建（CI/纯前端开发），`linked()` 返回 false。
+- 实测（librime 1.17.0，api.data_size=788）：进程内 `deploy()` 返回 1；会话输入 `nihao`
+  得到候选「你好」；选中后 `get_commit` 返回「你好」。**无需任何子进程**。
+- 两个真 bug 由探针抓出：
+  1. **librime 全局状态不是线程安全的**——两个测试并行 `setup/deploy` 直接 SIGSEGV。
+     产品侧必须"单例引擎 + 串行化"（部署锁已有）；测试里用 `Mutex` 串行。
+  2. C shim 的 `qz_select` 在 `free_commit` **之后**才读 `c.text`，被 free 置空 →
+     上屏永远返回空。改为先取 `has_text` 再释放。
+- 词典 fixture 踩坑：Rime `*.dict.yaml` 列顺序是 `文字 <tab> 编码 <tab> 权重`（不是编码在前）。

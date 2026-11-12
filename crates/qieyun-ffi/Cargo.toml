@@ -1,0 +1,11 @@
+[package]
+name = "qieyun-ffi"
+description = "切韵：librime 的窄 ABI 封装（C shim + 安全 Rust API），用于进程内部署与打字预览"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+links = "qieyun_shim"
+
+[dependencies]

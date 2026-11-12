@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/qieyun-kit"]
+members = ["crates/qieyun-kit", "crates/qieyun-ffi"]
 
 [workspace.package]
 version = "0.1.0"

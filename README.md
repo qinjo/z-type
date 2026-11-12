@@ -20,7 +20,8 @@
 
 | 路径 | 说明 |
 |---|---|
-| `crates/qieyun-kit/` | 领域核心（纯 Rust，无 FFI）：写回引擎、主题编译、模糊音、快照、重载计划 |
+| `crates/qieyun-kit/` | 领域核心（纯 Rust，无 FFI）：写回引擎、主题编译、模糊音、诊断、快照、重载计划 |
+| `crates/qieyun-ffi/` | librime 的 C shim + 安全 Rust API（进程内部署 / 打字预览）；无 librime 时自动 stub |
 | `apps/desktop/` | Tauri 2 + React 配置工作台 |
 | `platform/macos/` | fork 的 Squirrel（git subtree，尚未接入） |
 | `platform/windows/` | fork 的 Weasel（git subtree，尚未接入） |

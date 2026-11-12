@@ -106,6 +106,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "qieyun-ffi"
+version = "0.1.0"
+
+[[package]]
 name = "qieyun-kit"
 version = "0.1.0"
 dependencies = [
